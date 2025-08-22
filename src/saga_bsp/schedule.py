@@ -116,11 +116,23 @@ class Superstep:
             list
         )  # Tasks scheduled on each processor
 
-    def schedule_task(self, task: str, processor: str) -> BSPTask:
-        """Schedule a task at the end of a specific processor in this superstep."""
+    def schedule_task(self, task: str, processor: str, position: Optional[int] = None) -> BSPTask:
+        """Schedule a task at a specific position on a processor in this superstep.
+        
+        Args:
+            task: Task name to schedule
+            processor: Processor to schedule on
+            position: Optional position in the processor's task list. If None, appends to end.
+        """
         bsp_task = BSPTask(task, processor, self)
-        self.tasks[processor].append(bsp_task)
-        self.schedule.task_mapping[task] = bsp_task  # Update the task mapping
+        
+        if position is None:
+            self.tasks[processor].append(bsp_task)
+        else:
+            self.tasks[processor].insert(position, bsp_task)
+            
+        # Update the task mapping - add to list of instances (defaultdict handles creation)
+        self.schedule.task_mapping[task].append(bsp_task)
         self.invalidate_timings()
         return bsp_task
 
@@ -213,31 +225,44 @@ class Superstep:
         tasks_on_processor = self.tasks.get(processor, [])
         
         for task in tasks_on_processor:
-            # For each task, find dependencies from previous supersteps on other processors
+            # For each task, find dependencies that require communication
             for pred_task_name in self.task_graph.predecessors(task.node):
-                # Get the BSPTask for the predecessor
-                pred_bsp_task = self.schedule.task_mapping.get(pred_task_name)
+                pred_instances = self.schedule.task_mapping[pred_task_name]
                 
-                if pred_bsp_task and pred_bsp_task.proc != processor:
-                    # This is an inter-processor dependency
-                    # Check if predecessor is from a previous superstep
-                    if pred_bsp_task.superstep.index < self.index:
-                        # Get communication cost from task graph
-                        comm_weight = self.task_graph.edges[(pred_task_name, task.node)]['weight']
-                        
-                        # Get network connection speed between processors
-                        if self.network.has_edge(pred_bsp_task.proc, processor):
-                            network_speed = self.network.edges[pred_bsp_task.proc, processor]['weight']
-                        else:
-                            raise ValueError(
-                                f"Task wants to communicate between processors {pred_bsp_task.proc} and {processor}, "
-                                "but no connection exists in the network."
-                            )
-                        
-                        # Exchange time = communication weight / network speed
-                        exchange_time = comm_weight / network_speed
-                        # total_exchange_time += exchange_time
-                        total_exchange_time = max(total_exchange_time, exchange_time)
+                # First check: Is the predecessor already on this processor in this or a previous superstep?
+                local_instance = None
+                for pred_instance in pred_instances:
+                    if pred_instance.proc == processor and pred_instance.superstep.index <= self.index:
+                        local_instance = pred_instance
+                        break
+                
+                # If we have a local instance, no communication needed
+                if local_instance:
+                    continue
+                
+                # Otherwise, find first instance from a previous superstep for communication
+                comm_instance = None
+                for pred_instance in pred_instances:
+                    if pred_instance.superstep.index < self.index:
+                        comm_instance = pred_instance
+                        break
+                
+                if comm_instance:
+                    # Calculate communication cost from this instance
+                    comm_weight = self.task_graph.edges[(pred_task_name, task.node)]['weight']
+                    
+                    # Get network connection speed between processors
+                    if self.network.has_edge(comm_instance.proc, processor):
+                        network_speed = self.network.edges[comm_instance.proc, processor]['weight']
+                    else:
+                        raise ValueError(
+                            f"Task wants to communicate between processors {comm_instance.proc} and {processor}, "
+                            "but no connection exists in the network."
+                        )
+                    
+                    # Exchange time = communication weight / network speed
+                    exchange_time = comm_weight / network_speed
+                    total_exchange_time = max(total_exchange_time, exchange_time)
         
         return total_exchange_time
 
@@ -254,8 +279,8 @@ class BSPSchedule:
         self.hardware = hardware  # The BSP hardware configuration
         self.task_graph = task_graph  # The task graph for this schedule
         self.supersteps: List[Superstep] = []  # List of supersteps in this schedule
-        self.task_mapping: Dict[str, List[BSPTask]] = (
-            {}
+        self.task_mapping: defaultdict[str, List[BSPTask]] = defaultdict(
+            list
         )  # Mapping of task names to lists of BSPTask objects (supports duplication)
 
     def add_superstep(self) -> Superstep:
@@ -264,25 +289,36 @@ class BSPSchedule:
         self.supersteps.append(superstep)
         return superstep
 
-    def __getitem__(self, task_name: str) -> Optional[BSPTask]:
-        """Returns the mapped BSPTask for a given task name, or None if not found.
-        This is the main entry point to access scheduling information for a specific task.
+    def __getitem__(self, task_name: str) -> List[BSPTask]:
+        """Returns the list of BSPTask instances for a given task name.
+        Returns empty list if task not found (due to defaultdict behavior).
         """
-        return self.task_mapping.get(task_name, None)
+        return self.task_mapping[task_name]
     
-    def schedule(self, task: str, processor: str, superstep: Superstep) -> BSPTask:
+    def get_primary_instance(self, task_name: str) -> Optional[BSPTask]:
+        """Returns the first (primary) instance of a task, or None if not found.
+        Useful for backward compatibility with single-instance assumptions.
+        """
+        instances = self.task_mapping[task_name]
+        return instances[0] if instances else None
+    
+    def get_all_instances(self, task_name: str) -> List[BSPTask]:
+        """Returns all instances of a task. Same as __getitem__ but more explicit."""
+        return self.task_mapping[task_name]
+    
+    def schedule(self, task: str, processor: str, superstep: Superstep, position: Optional[int] = None) -> BSPTask:
         """Schedule a task on a specific processor in a superstep."""
-        bsp_task = superstep.schedule_task(task, processor)
+        bsp_task = superstep.schedule_task(task, processor, position)
         return bsp_task
     
     def unschedule(self, task: BSPTask) -> None:
-        """Remove a task from the schedule."""
-        if task.node in self.task_mapping:
-            del self.task_mapping[task.node]
+        """Remove a specific task instance from the schedule."""
+        if task.node in self.task_mapping and task in self.task_mapping[task.node]:
+            self.task_mapping[task.node].remove(task)
             task.superstep.tasks[task.proc].remove(task)
             task.superstep.invalidate_timings()
         else:
-            raise KeyError(f"Task {task.node} not found in schedule.")
+            raise KeyError(f"Task instance {task} not found in schedule.")
         
 
     @property
@@ -327,25 +363,37 @@ class BSPSchedule:
             if extra:
                 errors.append(f"Extra tasks in schedule not in graph: {extra}")
         
-        # Check precedence constraints
+        # Check precedence constraints for all task instances
         for task_name in self.task_mapping:
-            task = self.task_mapping[task_name]
-            current_superstep = task.superstep.index
+            task_instances = self.task_mapping[task_name]
             
-            # All predecessors must be in earlier supersteps or same superstep on different processor
-            for pred_name in self.task_graph.predecessors(task_name):
-                if pred_name in self.task_mapping:
-                    pred_task = self.task_mapping[pred_name]
-                    pred_superstep = pred_task.superstep.index
-                    
-                    if pred_superstep > current_superstep:
-                        errors.append(f"Precedence violation: {pred_name} (superstep {pred_superstep}) -> {task_name} (superstep {current_superstep})")
-                    elif pred_superstep == current_superstep and pred_task.proc == task.proc:
-                        # Same superstep, same processor - check execution order
-                        pred_index = pred_task.index
-                        task_index = task.index
-                        if pred_index >= task_index:
-                            errors.append(f"Execution order violation in superstep {current_superstep}: {pred_name} (index {pred_index}) -> {task_name} (index {task_index})")
+            for task_instance in task_instances:
+                current_superstep = task_instance.superstep.index
+                
+                # All predecessors must be in earlier supersteps or same superstep but with proper ordering
+                for pred_name in self.task_graph.predecessors(task_name):
+                    if pred_name in self.task_mapping:
+                        pred_instances = self.task_mapping[pred_name]
+                        
+                        # Check if there's at least one valid predecessor instance
+                        valid_predecessor = False
+                        for pred_instance in pred_instances:
+                            pred_superstep = pred_instance.superstep.index
+                            
+                            if pred_superstep < current_superstep:
+                                # Predecessor in earlier superstep - always valid
+                                valid_predecessor = True
+                                break
+                            elif pred_superstep == current_superstep and pred_instance.proc == task_instance.proc:
+                                # Same superstep and same processor - check execution order
+                                if pred_instance.index < task_instance.index:
+                                    valid_predecessor = True
+                                    break
+                            # Note: Different processors in same superstep is INVALID in BSP
+                            # as tasks in the same superstep must be independent
+                        
+                        if not valid_predecessor:
+                            errors.append(f"Precedence violation: No valid predecessor {pred_name} found for {task_name} instance in superstep {current_superstep} on processor {task_instance.proc}")
         
         # Check that all processors exist in hardware network
         for superstep in self.supersteps:
@@ -354,9 +402,10 @@ class BSPSchedule:
                     errors.append(f"Processor {processor} not found in hardware network")
         
         # Check that task mapping is consistent with superstep assignments
-        for task_name, task in self.task_mapping.items():
-            if task not in task.superstep.tasks[task.proc]:
-                errors.append(f"Task mapping inconsistency: {task_name} not found in superstep {task.superstep.index} processor {task.proc}")
+        for task_name, task_instances in self.task_mapping.items():
+            for task_instance in task_instances:
+                if task_instance not in task_instance.superstep.tasks[task_instance.proc]:
+                    errors.append(f"Task mapping inconsistency: {task_name} instance not found in superstep {task_instance.superstep.index} processor {task_instance.proc}")
         
         # Check for duplicate task assignments
         all_scheduled_tasks = []
@@ -373,6 +422,12 @@ class BSPSchedule:
         
         return len(errors) == 0, errors
 
+
+    def assert_valid(self):
+        """Assert that the schedule is valid. Raises ValueError if not."""
+        is_valid, errors = self.is_valid()
+        if not is_valid:
+            raise ValueError(f"Invalid BSP schedule: {errors}")
 class AsyncSchedule(MutableMapping[Hashable, List[Task]]):
     """Encapsulates an asynchronous schedule as a mapping of processors to task lists.
     In SAGA, `Dict[Hashable, List[Task]]` is used to represent a (asynchronous) schedule.
