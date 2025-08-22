@@ -6,6 +6,7 @@ from .simulated_annealing import (
     MoveTaskToSuperstep,
     MoveTaskToProcessor,
     DuplicateAndMoveTask,
+    MergeSupersteps,
     SimulatedAnnealingIteration
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     'MoveTaskToSuperstep', 
     'MoveTaskToProcessor',
     'DuplicateAndMoveTask',
+    'MergeSupersteps',
     'SimulatedAnnealingIteration'
 ]
