@@ -294,3 +294,22 @@ def draw_tile_activity(bsp_schedule: BSPSchedule,
     
     plt.tight_layout()
     return axis
+
+def print_bsp_schedule(schedule, title = "BSP Schedule"):
+    """Print schedule details"""
+    print(f"\n{title}")
+    print("=" * len(title))
+    print(f"Makespan: {schedule.makespan:.2f}")
+    print(f"Number of supersteps: {schedule.num_supersteps}")
+    
+    for i, superstep in enumerate(schedule.supersteps):
+        print(f"\nSuperstep {i} (start: {superstep.start_time:.2f}, end: {superstep.end_time:.2f}):")
+        print(f"  Sync time: {superstep.sync_time:.2f}")
+        print(f"  Exchange time: {superstep.exchange_time:.2f}")
+        print(f"  Compute time: {superstep.compute_time:.2f}")
+        print(f"  Total time: {superstep.total_time:.2f}")
+        
+        for proc, tasks in superstep.tasks.items():
+            if tasks:
+                task_info = ", ".join([f"{t.node}({t.duration:.1f})" for t in tasks])
+                print(f"    {proc}: {task_info}")
