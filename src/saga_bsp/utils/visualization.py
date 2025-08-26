@@ -13,6 +13,7 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
                    font_size: int = 16,
                    tick_font_size: int = 14,
                    figsize: Tuple[int, int] = (12, 6),
+                   title: Optional[str] = None,
                    axis: Optional[plt.Axes] = None) -> plt.Axes:
     """Draw BSP schedule with superstep boundaries and phases.
     
@@ -23,6 +24,7 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
         font_size: Font size for labels
         tick_font_size: Font size for tick labels  
         figsize: Figure size
+        title: Optional title for the plot
         axis: Existing axis to plot on
         
     Returns:
@@ -142,6 +144,8 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
         axis.set_axisbelow(True)
         axis.set_xlim(0, max_time * 1.05)
         axis.set_ylim(-0.5, len(all_processors) - 0.5)
+        if title:
+            axis.set_title(title, fontsize=font_size + 2)
         
         # Add legend if showing phases
         if show_phases:
