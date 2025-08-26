@@ -34,8 +34,8 @@ hardware = BSPHardware(network=network, sync_time=10.0)
 task_graph = nx.DiGraph()
 # ... add tasks and dependencies ...
 
-# Schedule using HEFT-BSP
-scheduler = HeftBSPScheduler(verbose=True)
+# Schedule using List-BSP
+scheduler = ListBSPScheduler(verbose=True)
 schedule = scheduler.schedule(hardware, task_graph)
 
 # Visualize the result
@@ -55,25 +55,30 @@ plot_gantt_chart(schedule)
 
 ### Scheduling Algorithms
 
-#### HEFT-BSP Scheduler
-Adapts the Heterogeneous Earliest Finish Time algorithm for BSP execution:
-```python
-from saga_bsp.schedulers import HeftBSPScheduler
-
-scheduler = HeftBSPScheduler(verbose=True)
-schedule = scheduler.schedule(hardware, task_graph)
-```
-
-#### List-Based BSP Scheduler
-Priority-based scheduling with configurable strategies:
+#### List-Based BSP Scheduler (WIP)
+HEFT-like scheduler that can split supersteps or append tasks to existing ones:
 ```python
 from saga_bsp.schedulers import ListBSPScheduler
 
 scheduler = ListBSPScheduler(
-    priority_function="bottom_level",
-    processor_selection="earliest_finish_time"
+    verbose=True,  # Enable detailed logging
+    draw_after_each_step=False  # Optionally visualize after each task placement
 )
 schedule = scheduler.schedule(hardware, task_graph)
+```
+
+The scheduler evaluates multiple placement strategies for each task:
+- Appending to existing supersteps
+- Creating new supersteps at dependency-ready times
+- Automatically chooses the strategy that minimizes makespan
+
+#### HEFT-BSP Scheduler (Experimental, non-working)
+Experimental adaptation of the Heterogeneous Earliest Finish Time algorithm for BSP:
+```python
+from saga_bsp.schedulers import HeftBSPScheduler
+
+scheduler = HeftBSPScheduler(verbose=True)
+schedule = scheduler.schedule(hardware, task_graph)  # Note: Still under development
 ```
 
 #### Async to BSP Conversion
