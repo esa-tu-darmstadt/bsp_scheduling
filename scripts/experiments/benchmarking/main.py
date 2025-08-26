@@ -10,6 +10,7 @@ from saga.schedulers import (
 )
 from saga.scheduler import Scheduler
 import saga_bsp as bsp
+from saga_bsp.schedulers import ListBSPScheduler
 
 from prepare import load_dataset, prepare_datasets
 
@@ -69,15 +70,31 @@ def create_schedulers(sync_time: float = 1.0) -> List[Scheduler]:
     schedulers.extend([HeftScheduler(), CpopScheduler()])
     
     # Then, we add async-to-BSP conversion schedulers
-    for async_scheduler in [HeftScheduler(), CpopScheduler()]:
-        for strategy, backfill_threshold in get_conversion_strategies():
-            schedulers.append(
-                bsp.SagaSchedulerWrapper(bsp.AsyncToBSPScheduler(
+    for async_scheduler in [HeftScheduler()]:
+        schedulers.append(bsp.SagaSchedulerWrapper(bsp.AsyncToBSPScheduler(
                     async_scheduler=async_scheduler,
-                    strategy=strategy,
-                    backfill_threshold_percent=backfill_threshold
-                ), sync_time=sync_time)
-            )
+                    strategy="earliest-finishing-next"
+                ), sync_time=sync_time))
+        schedulers.append(bsp.SagaSchedulerWrapper(bsp.AsyncToBSPScheduler(
+                    async_scheduler=async_scheduler,
+                    strategy="eager"
+                ), sync_time=sync_time))
+        # schedulers.append(bsp.SagaSchedulerWrapper(bsp.AsyncToBSPScheduler(
+        #             async_scheduler=async_scheduler,
+        #             strategy="earliest-finishing-next",
+        #             optimize_sa=True,
+        #             sa_max_iterations=50,
+        #             sa_cooling_rate=0.95
+        #         ), sync_time=sync_time))
+    schedulers.append(bsp.SagaSchedulerWrapper(ListBSPScheduler(), sync_time=sync_time, preprocess=True))
+        # for strategy, backfill_threshold in get_conversion_strategies():
+        #     schedulers.append(
+        #         bsp.SagaSchedulerWrapper(bsp.AsyncToBSPScheduler(
+        #             async_scheduler=async_scheduler,
+        #             strategy=strategy,
+        #             backfill_threshold_percent=backfill_threshold
+        #         ), sync_time=sync_time)
+        #     )
             
     # Finally, we add native BSP schedulers
     # TODO: Add native BSP schedulers if available
