@@ -259,8 +259,15 @@ class Superstep:
         Exchange time is the time needed to receive data from tasks in previous supersteps
         that are executed on different processors and whose outputs are needed by tasks
         in this superstep on this processor.
+        
+        Important: Data that was already communicated to this processor in an earlier
+        superstep does not need to be communicated again. We check this by looking at
+        all successors of the predecessor task - if any of them were already scheduled
+        on this processor in an earlier superstep, the data is already available.
         """
-        total_exchange_time = 0.0
+        # Track which data needs to be communicated to this processor
+        # Key: (source_task, source_proc), Value: communication cost
+        data_to_communicate = {}
         
         # Get all tasks on this processor in this superstep
         tasks_on_processor = self.tasks.get(processor, [])
@@ -289,23 +296,51 @@ class Superstep:
                         break
                 
                 if comm_instance:
-                    # Calculate communication cost from this instance
-                    comm_weight = self.task_graph.edges[(pred_task_name, task.node)]['weight']
+                    # Check if this data was already communicated to this processor
+                    # by checking if any successor of pred_task_name was scheduled on this processor before
+                    data_already_available = False
                     
-                    # Get network connection speed between processors
-                    if self.network.has_edge(comm_instance.proc, processor):
-                        network_speed = self.network.edges[comm_instance.proc, processor]['weight']
-                    else:
-                        raise ValueError(
-                            f"Task wants to communicate between processors {comm_instance.proc} and {processor}, "
-                            "but no connection exists in the network."
-                        )
+                    # Get all successors of the predecessor task
+                    pred_successors = list(self.task_graph.successors(pred_task_name))
                     
-                    # Exchange time = communication weight / network speed
-                    exchange_time = comm_weight / network_speed
-                    total_exchange_time = max(total_exchange_time, exchange_time)
+                    # Check all previous supersteps
+                    for prev_superstep_idx in range(self.index):
+                        prev_superstep = self.schedule.supersteps[prev_superstep_idx]
+                        prev_tasks = prev_superstep.tasks.get(processor, [])
+                        
+                        # Check if any successor of pred_task_name was scheduled on this processor
+                        for prev_task in prev_tasks:
+                            if prev_task.node in pred_successors:
+                                # This processor already received the data from pred_task_name
+                                data_already_available = True
+                                break
+                        
+                        if data_already_available:
+                            break
+                    
+                    # Only communicate if data is not already available
+                    if not data_already_available:
+                        # Calculate communication cost from this instance
+                        comm_weight = self.task_graph.edges[(pred_task_name, task.node)]['weight']
+                        
+                        # Get network connection speed between processors
+                        if self.network.has_edge(comm_instance.proc, processor):
+                            network_speed = self.network.edges[comm_instance.proc, processor]['weight']
+                        else:
+                            raise ValueError(
+                                f"Task wants to communicate between processors {comm_instance.proc} and {processor}, "
+                                "but no connection exists in the network."
+                            )
+                        
+                        # Exchange time = communication weight / network speed
+                        exchange_time = comm_weight / network_speed
+                        
+                        # Track the maximum communication time for this data source
+                        key = (pred_task_name, comm_instance.proc)
+                        data_to_communicate[key] = max(data_to_communicate.get(key, 0), exchange_time)
         
-        return total_exchange_time
+        # Return the maximum communication time needed (all communications happen in parallel)
+        return max(data_to_communicate.values()) if data_to_communicate else 0.0
 
     @property
     def compute_phase_start(self) -> float:
