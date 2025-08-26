@@ -41,6 +41,9 @@ schedule = scheduler.schedule(hardware, task_graph)
 # Visualize the result
 from saga_bsp.visualization import plot_gantt_chart
 plot_gantt_chart(schedule)
+
+import matplotlib.pyplot as plt
+plt.show()
 ```
 
 ## Features
@@ -243,7 +246,7 @@ pytest tests/test_schedule.py
 pytest --cov=saga_bsp
 ```
 
-## Contributing
+<!-- ## Contributing
 
 Contributions are welcome! Please follow these guidelines:
 
@@ -251,13 +254,13 @@ Contributions are welcome! Please follow these guidelines:
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Commit your changes (`git commit -m 'Add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+5. Open a Pull Request -->
 
-## License
+<!-- ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License - see the LICENSE file for details. -->
 
-## Citation
+<!-- ## Citation
 
 If you use SAGA-BSP in your research, please cite:
 ```bibtex
@@ -267,10 +270,10 @@ If you use SAGA-BSP in your research, please cite:
   year = {2024},
   url = {https://github.com/yourusername/saga-bsp}
 }
-```
+``` -->
 
-## Acknowledgments
+<!-- ## Acknowledgments
 
 - Built on top of [SAGA](https://github.com/saga-scheduling/saga)
 - Inspired by BSP model research in parallel computing
-- Special thanks to contributors and maintainers
+- Special thanks to contributors and maintainers -->
