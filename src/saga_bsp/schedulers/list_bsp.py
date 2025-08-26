@@ -120,7 +120,7 @@ class ListBSPScheduler(BSPScheduler):
             task_name = task_item.task
             
             if self.verbose:
-                logger.debug(f"\nProcessing task {task_name} with rank {rank[task_name]}")
+                logger.debug(f"\n#{i}: Processing task {task_name} with rank {rank[task_name]}")
             
             # Find best placement strategy
             best_processor, best_superstep, best_makespan = self._find_best_placement(
@@ -144,7 +144,7 @@ class ListBSPScheduler(BSPScheduler):
             
             # Optionally draw Gantt chart after each step
             if self.draw_after_each_step:
-                draw_bsp_gantt(schedule, title=f"#{i} After scheduling {task_name}")
+                draw_bsp_gantt(schedule, title=f"After #{i}: Scheduling {task_name}")
             i += 1
 
         # Merge supersteps where possible to reduce synchronization overhead
