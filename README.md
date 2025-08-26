@@ -22,27 +22,27 @@ pip install -e ".[visualization]"
 ## Quick Start
 
 ```python
-import networkx as nx
-from saga_bsp.schedule import BSPSchedule, BSPHardware
-from saga_bsp.schedulers import HeftBSPScheduler
+from saga.schedulers.data.random import gen_random_networks, gen_parallel_chains
+import saga_bsp as bsp
+from saga_bsp.schedulers import ListBSPScheduler
+import matplotlib.pyplot as plt
 
-# Create hardware configuration
-network = nx.complete_graph(4)  # 4 fully-connected processors
-hardware = BSPHardware(network=network, sync_time=10.0)
+# Generate hardware network and task graph
+network = gen_random_networks(1, 4)[0]  # 4-processor network
+task_graph = gen_parallel_chains(1, 3, 3)[0]  # 3 chains of 3 tasks
 
-# Load or create your task graph
-task_graph = nx.DiGraph()
-# ... add tasks and dependencies ...
+# Preprocess task graph (required for BSP scheduling)
+task_graph, _ = bsp.preprocess_task_graph(task_graph)
+
+# Create BSP hardware configuration
+hardware = bsp.BSPHardware(network=network, sync_time=1.0)
 
 # Schedule using List-BSP
 scheduler = ListBSPScheduler(verbose=True)
 schedule = scheduler.schedule(hardware, task_graph)
 
 # Visualize the result
-from saga_bsp.visualization import plot_gantt_chart
-plot_gantt_chart(schedule)
-
-import matplotlib.pyplot as plt
+bsp.draw_bsp_gantt(schedule, title="BSP Schedule")
 plt.show()
 ```
 
@@ -181,23 +181,29 @@ Key methods:
 
 ### Converting SAGA Async Schedule
 ```python
-from saga import Task, Hardware
-from saga.schedulers import HEFTScheduler
-from saga_bsp.conversion import convert_async_to_bsp
-from saga_bsp.schedule import BSPHardware
+from saga.schedulers import HeftScheduler
+from saga.schedulers.data.random import gen_random_networks, gen_out_trees
+import saga_bsp as bsp
+
+# Generate network and task graph
+network = gen_random_networks(1, 5)[0]  # 5-processor network
+task_graph = gen_out_trees(1, 3, 3)[0]  # Out-tree with 3 levels, branching factor 3
+
+# Preprocess task graph
+task_graph, _ = bsp.preprocess_task_graph(task_graph)
 
 # Create async schedule using SAGA
-saga_hw = Hardware(num_processors=4)
-saga_scheduler = HEFTScheduler()
-async_schedule = saga_scheduler.schedule(task_graph, saga_hw)
+async_scheduler = HeftScheduler()
+async_schedule = async_scheduler.schedule(network, task_graph)
 
 # Convert to BSP
-bsp_hw = BSPHardware(network=nx.complete_graph(4), sync_time=10.0)
-bsp_schedule = convert_async_to_bsp(
-    bsp_hw,
+bsp_hardware = bsp.BSPHardware(network=network, sync_time=1.0)
+bsp_schedule = bsp.convert_async_to_bsp(
+    bsp_hardware,
     task_graph, 
     async_schedule,
     strategy="earliest-finishing-next",
+    backfill_threshold_percent=0.05,
     optimize_sa=True
 )
 ```
@@ -205,31 +211,32 @@ bsp_schedule = convert_async_to_bsp(
 ### Custom Task Graph
 ```python
 import networkx as nx
-from saga import Task
+from saga.schedulers.data.random import gen_random_networks
+import saga_bsp as bsp
+from saga_bsp.schedulers import ListBSPScheduler
 
-# Create task graph
-G = nx.DiGraph()
+# Create custom task graph
+task_graph = nx.DiGraph()
 
-# Add tasks with computation costs
-tasks = {
-    "A": Task("A", flops=100),
-    "B": Task("B", flops=150),
-    "C": Task("C", flops=200),
-    "D": Task("D", flops=120)
-}
+# Add tasks with computation costs (weight in FLOPS)
+task_graph.add_node("A", weight=100)
+task_graph.add_node("B", weight=150)
+task_graph.add_node("C", weight=200)
+task_graph.add_node("D", weight=120)
 
-for name, task in tasks.items():
-    G.add_node(name, weight=task.flops)
+# Add dependencies with communication costs (weight in bytes)
+task_graph.add_edge("A", "B", weight=50)
+task_graph.add_edge("A", "C", weight=30)
+task_graph.add_edge("B", "D", weight=40)
+task_graph.add_edge("C", "D", weight=60)
 
-# Add dependencies with communication costs
-G.add_edge("A", "B", weight=50)  # 50 bytes of data
-G.add_edge("A", "C", weight=30)
-G.add_edge("B", "D", weight=40)
-G.add_edge("C", "D", weight=60)
+# Preprocess and schedule
+task_graph, _ = bsp.preprocess_task_graph(task_graph)
+network = gen_random_networks(1, 4)[0]
+hardware = bsp.BSPHardware(network=network, sync_time=1.0)
 
-# Schedule
-scheduler = HeftBSPScheduler()
-schedule = scheduler.schedule(hardware, G)
+scheduler = ListBSPScheduler(verbose=True)
+schedule = scheduler.schedule(hardware, task_graph)
 ```
 
 ## Testing
