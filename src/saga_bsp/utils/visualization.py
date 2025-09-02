@@ -13,7 +13,9 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
                    font_size: int = 16,
                    tick_font_size: int = 14,
                    figsize: Tuple[int, int] = (12, 6),
+                   legend_loc: Optional[str] = 'upper right',
                    title: Optional[str] = None,
+                   y_label: Optional[str] = 'Processors',
                    axis: Optional[plt.Axes] = None) -> plt.Axes:
     """Draw BSP schedule with superstep boundaries and phases.
     
@@ -24,7 +26,9 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
         font_size: Font size for labels
         tick_font_size: Font size for tick labels  
         figsize: Figure size
+        legend_loc: Location for the legend (None for no legend)
         title: Optional title for the plot
+        y_label: Label for the y-axis (None for no label)
         axis: Existing axis to plot on
         
     Returns:
@@ -138,7 +142,8 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
         axis.set_yticks(list(y_positions.values()))
         axis.set_yticklabels(list(y_positions.keys()))
         axis.set_xlabel('Time', fontsize=font_size)
-        axis.set_ylabel('Processors', fontsize=font_size)
+        if y_label:
+            axis.set_ylabel(y_label, fontsize=font_size)
         axis.tick_params(axis='both', which='major', labelsize=tick_font_size)
         axis.grid(True, which='both', linestyle=':', alpha=0.3)
         axis.set_axisbelow(True)
@@ -155,8 +160,9 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
                 patches.Patch(color=colors['compute'], alpha=0.3, label='Computation'),
                 patches.Patch(facecolor=colors['task'], edgecolor='black', label='Tasks')
             ]
-            axis.legend(handles=legend_elements, loc='upper right', fontsize=font_size-2)
-        
+            if legend_loc is not None:
+                axis.legend(handles=legend_elements, loc=legend_loc, fontsize=font_size-1, framealpha=1.0)
+
         plt.tight_layout()
         return axis
 
