@@ -382,6 +382,26 @@ class BSPSchedule:
         """Returns all instances of a task. Same as __getitem__ but more explicit."""
         return self.task_mapping[task_name]
     
+    def get_single_instance(self, task_name: str) -> BSPTask:
+        """Returns the single instance of a task.
+        Used by schedulers that assume no task duplication.
+        
+        Args:
+            task_name: Name of the task
+            
+        Returns:
+            The single BSPTask instance
+            
+        Raises:
+            ValueError: If task has no instances or multiple instances (duplication)
+        """
+        instances = self.task_mapping[task_name]
+        if len(instances) == 0:
+            raise ValueError(f"Task {task_name} has not been scheduled")
+        if len(instances) > 1:
+            raise ValueError(f"Task {task_name} has {len(instances)} instances (duplication not supported)")
+        return instances[0]
+    
     def task_scheduled(self, task_name: str) -> bool:
         """Check if a task has been scheduled in this schedule."""
         return task_name in self.task_mapping and len(self.task_mapping[task_name]) > 0
