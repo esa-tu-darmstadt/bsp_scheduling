@@ -143,13 +143,18 @@ class FillInSplitBSPScheduler(BSPScheduler):
             # Phase 3: Use split strategy (always works)
             if not placed:
                 processor, superstep = self._do_split(task_name, schedule, hardware, task_graph)
-                schedule.schedule(task_name, processor, superstep)
+                # Schedule the task at the beginning of the new/split superstep
+                schedule.schedule(task_name, processor, superstep, 0) 
                 self.stats['split_placements'] += 1
                 placed = True
                 if self.verbose:
                     logger.debug(f"  Placed using split strategy on processor {processor}, "
                                f"superstep {superstep.index}")
             
+            # FIXME: 
+            if superstep.index > 0 and schedule.merge_supersteps(superstep.index-1) > 0:
+                self.stats['supersteps_merged'] += 1
+                logger.debug(f"  Merged supersteps {superstep.index-1} and {superstep.index} after placement")
             self.stats['tasks_scheduled'] += 1
             
             # Add newly ready successors to queue
@@ -196,6 +201,10 @@ class FillInSplitBSPScheduler(BSPScheduler):
                                      hardware: BSPHardware, task_graph: nx.DiGraph) -> float:
         """Calculate communication time for predecessors not on same processor.
         
+        Since we don't use task duplication, each predecessor has exactly one instance.
+        Communication is needed if the predecessor is on a different processor and in
+        a previous superstep.
+        
         Args:
             task_name: Task to calculate communication for
             processor: Target processor
@@ -205,36 +214,36 @@ class FillInSplitBSPScheduler(BSPScheduler):
             task_graph: Task dependency graph
             
         Returns:
-            Total communication time needed
+            Total communication time needed (maximum since communications happen in parallel)
         """
         comm_time = 0.0
         
         for pred_name in task_graph.predecessors(task_name):
-            pred_instances = schedule.get_all_instances(pred_name)
+            if not schedule.task_scheduled(pred_name):
+                continue  # Predecessor not scheduled yet
             
-            # Find best instance to communicate from
-            need_comm = True
-            for instance in pred_instances:
-                # If predecessor is on same processor and available, no communication needed
-                if instance.proc == processor:
-                    if instance.superstep.index < superstep.index or \
-                       (instance.superstep.index == superstep.index and instance.superstep == superstep):
-                        need_comm = False
-                        break
+            # Get the single instance of the predecessor
+            pred_instance = schedule.get_single_instance(pred_name)
             
-            if need_comm:
-                # Find earliest instance from different processor
-                best_instance = None
-                for instance in pred_instances:
-                    if instance.superstep.index < superstep.index:
-                        if best_instance is None or instance.end < best_instance.end:
-                            best_instance = instance
+            # Check if communication is needed
+            # No communication needed if:
+            # 1. Predecessor is on same processor AND in same superstep, OR
+            # 2. Predecessor is on same processor AND in earlier superstep
+            if pred_instance.proc == processor:
+                # Same processor - no communication needed
+                continue
+            
+            # Different processor - need communication if predecessor is in earlier superstep
+            if pred_instance.superstep.index < superstep.index:
+                # Calculate communication time
+                edge_weight = task_graph.edges[(pred_name, task_name)]['weight']
                 
-                if best_instance and best_instance.proc != processor:
-                    edge_weight = task_graph.edges[(pred_name, task_name)]['weight']
-                    if hardware.network.has_edge(best_instance.proc, processor):
-                        network_speed = hardware.network.edges[best_instance.proc, processor]['weight']
-                        comm_time = max(comm_time, edge_weight / network_speed)
+                if hardware.network.has_edge(pred_instance.proc, processor):
+                    network_speed = hardware.network.edges[pred_instance.proc, processor]['weight']
+                    comm_time = comm_time + edge_weight / network_speed
+                else:
+                    # No network connection available
+                    return float('inf')
         
         return comm_time
     
@@ -309,38 +318,38 @@ class FillInSplitBSPScheduler(BSPScheduler):
         best_processor = None
         best_finish_time = float('inf')
         
-        # For each processor, check if we would split at last superstep
+        # Get dependency-ready time (same for all processors)
+        dep_ready_time = self._get_dependency_ready_time(task_name, schedule, task_graph)
+        
+        if dep_ready_time == float('inf'):
+            return None, None
+        
+        # Check which superstep this time falls into
+        superstep_at_time = schedule.get_superstep_at_time(dep_ready_time)
+        
+        # Only proceed if dependency-ready time is in last superstep
+        if superstep_at_time != last_superstep:
+            return None, None
+        
+        # For each processor, try to append to last superstep
         for processor in hardware.network.nodes:
-            # Calculate dependency-ready time
-            dep_ready_time = self._get_dependency_ready_time(
-                task_name, processor, schedule, task_graph
-            )
-            
-            if dep_ready_time == float('inf'):
-                continue
-            
-            # Check which superstep this time falls into
-            superstep_at_time = schedule.get_superstep_at_time(dep_ready_time)
-            
-            # Only try append if dependency-ready time is in last superstep
-            if superstep_at_time == last_superstep:
-                # Check if we can schedule in last superstep
-                if schedule.can_be_scheduled_in(task_name, last_superstep, processor):
-                    # Calculate task duration
-                    task_duration = self._calculate_task_duration(task_name, processor, hardware, task_graph)
+            # Check if we can schedule in last superstep
+            if schedule.can_be_scheduled_in(task_name, last_superstep, processor):
+                # Calculate task duration
+                task_duration = self._calculate_task_duration(task_name, processor, hardware, task_graph)
+                
+                # Calculate finish time
+                proc_end_time = last_superstep.compute_time_of_processor(processor)
+                task_finish_relative = proc_end_time + task_duration
+                task_finish_absolute = last_superstep.compute_phase_start + task_finish_relative
+                
+                if task_finish_absolute < best_finish_time:
+                    best_finish_time = task_finish_absolute
+                    best_processor = processor
                     
-                    # Calculate finish time
-                    proc_end_time = last_superstep.compute_time_of_processor(processor)
-                    task_finish_relative = proc_end_time + task_duration
-                    task_finish_absolute = last_superstep.compute_phase_start + task_finish_relative
-                    
-                    if task_finish_absolute < best_finish_time:
-                        best_finish_time = task_finish_absolute
-                        best_processor = processor
-                        
-                        if self.verbose:
-                            logger.debug(f"    Found append opportunity: last superstep, "
-                                       f"proc {processor}, finish={task_finish_absolute:.2f}")
+                    if self.verbose:
+                        logger.debug(f"    Found append opportunity: last superstep, "
+                                   f"proc {processor}, finish={task_finish_absolute:.2f}")
         
         if best_processor is not None:
             return best_processor, last_superstep
@@ -351,6 +360,12 @@ class FillInSplitBSPScheduler(BSPScheduler):
                  hardware: BSPHardware, task_graph: nx.DiGraph) -> Tuple[str, Superstep]:
         """Place task using split strategy (create/split superstep).
         
+        This method:
+        1. Gets the dependency-ready time
+        2. Creates/splits superstep at that time
+        3. Evaluates all processors on this new superstep
+        4. Places task on best processor
+        
         Args:
             task_name: Task to place
             schedule: Current schedule
@@ -360,45 +375,20 @@ class FillInSplitBSPScheduler(BSPScheduler):
         Returns:
             Tuple of (processor, superstep) for placement
         """
-        best_processor = None
-        best_finish_time = float('inf')
-        best_split_time = None
+        # Step 1: Get the dependency-ready time (same for all processors)
+        dep_ready_time = self._get_dependency_ready_time(task_name, schedule, task_graph)
         
-        # Evaluate each processor
-        for processor in hardware.network.nodes:
-            # Calculate dependency-ready time
-            dep_ready_time = self._get_dependency_ready_time(
-                task_name, processor, schedule, task_graph
-            )
-            
-            if dep_ready_time == float('inf'):
-                continue
-            
-            # Create test schedule to evaluate
-            test_schedule = schedule.copy()
-            test_superstep = test_schedule.get_or_create_superstep_at_time(dep_ready_time)
-            
-            # Schedule task to get timing
-            test_task = test_schedule.schedule(task_name, processor, test_superstep)
-            task_finish_time = test_task.end
-            
-            if task_finish_time < best_finish_time:
-                best_finish_time = task_finish_time
-                best_processor = processor
-                best_split_time = dep_ready_time
-                
-                if self.verbose:
-                    logger.debug(f"    Split option: proc {processor}, split_time={dep_ready_time:.2f}, "
-                               f"finish={task_finish_time:.2f}")
+        if dep_ready_time == float('inf'):
+            raise ValueError(f"Could not find valid dependency-ready time for task {task_name}")
         
-        if best_processor is None:
-            raise ValueError(f"Could not find valid processor for task {task_name}")
+        if self.verbose:
+            logger.debug(f"    Dependency-ready time: {dep_ready_time:.2f}")
         
-        # Apply the split
+        # Step 2: Create/split superstep at the dependency-ready time (only once!)
         original_count = len(schedule.supersteps)
-        superstep = schedule.get_or_create_superstep_at_time(best_split_time)
+        superstep = schedule.get_or_create_superstep_at_time(dep_ready_time)
         
-        # Update statistics
+        # Update statistics for superstep creation/splitting
         if len(schedule.supersteps) > original_count:
             if superstep.index == len(schedule.supersteps) - 1:
                 self.stats['supersteps_created'] += 1
@@ -409,39 +399,64 @@ class FillInSplitBSPScheduler(BSPScheduler):
                 if self.verbose:
                     logger.debug(f"    Split to create superstep {superstep.index}")
         
+        # Step 3: Evaluate each processor for best placement
+        best_processor = None
+        best_finish_time = float('inf')
+        
+        for processor in hardware.network.nodes:
+            # Make sure we can schedule in this superstep on this processor
+            if not schedule.can_be_scheduled_in(task_name, superstep, processor):
+                raise ValueError(f"Cannot schedule task {task_name} on processor {processor} in superstep {superstep.index} after split")
+            
+            # Calculate task duration including communication
+            task_duration = self._calculate_task_duration(task_name, processor, hardware, task_graph) + \
+                            self._calculate_communication_time(task_name, processor, superstep, schedule, hardware, task_graph)
+
+            # Get current processor end time in the superstep
+            proc_end_time = superstep.compute_time_of_processor(processor)
+            
+            # Calculate when task would approximately finish
+            task_finish_relative = proc_end_time + task_duration
+            task_finish_absolute = superstep.compute_phase_start + task_finish_relative
+            
+            if task_finish_absolute < best_finish_time:
+                best_finish_time = task_finish_absolute
+                best_processor = processor
+                
+                if self.verbose:
+                    logger.debug(f"    Processor {processor}: finish={task_finish_absolute:.2f}")
+        
+        if self.verbose:
+            logger.debug(f"    Selected processor {best_processor} with finish time {best_finish_time:.2f}")
+        
         return best_processor, superstep
     
-    def _get_dependency_ready_time(self, task_name: str, processor: str,
+    def _get_dependency_ready_time(self, task_name: str,
                                   schedule: BSPSchedule, task_graph: nx.DiGraph) -> float:
-        """Calculate when all dependencies are ready for a task on a processor.
+        """Calculate the exact time when all dependencies are ready for a task.
+        
+        Since we don't use task duplication, each predecessor has exactly one instance.
+        The ready time is the latest end time among all predecessors.
         
         Args:
             task_name: Task to check
-            processor: Target processor
             schedule: Current schedule
             task_graph: Task dependency graph
             
         Returns:
-            Earliest time when all dependencies are available
+            Exact time when all dependencies have completed
         """
         ready_time = 0.0
         
         for pred_name in task_graph.predecessors(task_name):
-            pred_instances = schedule.get_all_instances(pred_name)
-            if not pred_instances:
+            if not schedule.task_scheduled(pred_name):
                 return float('inf')
             
-            # Find earliest available time for this dependency
-            earliest_available = float('inf')
-            for instance in pred_instances:
-                if instance.proc == processor:
-                    # Same processor - available right after completion
-                    earliest_available = min(earliest_available, instance.end)
-                else:
-                    # Different processor - available after superstep ends
-                    earliest_available = min(earliest_available, instance.superstep.end_time)
+            # Get the single instance of the predecessor
+            pred_instance = schedule.get_single_instance(pred_name)
             
-            ready_time = max(ready_time, earliest_available)
+            # Dependency is ready exactly when the predecessor task completes
+            ready_time = max(ready_time, pred_instance.end)
         
         return ready_time
     
