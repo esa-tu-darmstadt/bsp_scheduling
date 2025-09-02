@@ -580,18 +580,41 @@ class BSPSchedule:
         return len(self.supersteps)
     
     def copy(self) -> "BSPSchedule":
-        """Create a deep copy of the schedule while preserving functools caches."""
-        import copy
+        """Create a deep copy of the schedule while preserving cached timing values.
         
-        # Use deepcopy with a custom memo to handle the complex references
-        memo = {}
+        This method creates a structurally identical copy of the schedule while
+        preserving expensive cached computations like rel_start, compute_time, etc.
+        This significantly improves performance when schedulers frequently copy schedules.
+        """
+        # Create new schedule instance
+        new_schedule = BSPSchedule(self.hardware, self.task_graph)
         
-        # Do not copy BSPHardware or task graph, they are shared
-        memo[id(self.hardware)] = self.hardware
-        memo[id(self.task_graph)] = self.task_graph
+        # Copy supersteps while preserving caches
+        for superstep in self.supersteps:
+            new_superstep = new_schedule.add_superstep()
+            
+            # Copy tasks and build structure
+            for processor, tasks in superstep.tasks.items():
+                for task in tasks:
+                    # Note: schedule() creates a new BSPTask, we'll copy cache after
+                    new_task = new_schedule.schedule(task.node, processor, new_superstep)
+                    
+                    # Preserve rel_start cache from original task if it exists
+                    if hasattr(task, '__dict__') and 'rel_start' in task.__dict__:
+                        new_task.__dict__['rel_start'] = task.__dict__['rel_start']
+            
+            # Preserve superstep-level cached properties if they exist
+            if hasattr(superstep, '__dict__'):
+                # Preserve compute_time cache
+                if 'compute_time' in superstep.__dict__:
+                    new_superstep.__dict__['compute_time'] = superstep.__dict__['compute_time']
+                # Preserve exchange_time cache  
+                if 'exchange_time' in superstep.__dict__:
+                    new_superstep.__dict__['exchange_time'] = superstep.__dict__['exchange_time']
+                # Preserve sync_time cache (though it's a property, it might be cached in __dict__)
+                if 'sync_time' in superstep.__dict__:
+                    new_superstep.__dict__['sync_time'] = superstep.__dict__['sync_time']
         
-        # Deep copy the entire schedule
-        new_schedule = copy.deepcopy(self, memo)
         
         return new_schedule
     
