@@ -2,14 +2,13 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass
 from functools import cached_property, cache
 import sys
-from typing import Dict, Hashable, Iterator, List, Set, Optional, Tuple
+from typing import Dict, Hashable, Iterator, List, Literal, Set, Optional, Tuple
 from collections import defaultdict
 import networkx as nx
 from saga.scheduler import Task
 import copy
 import random
 import statistics
-
 
 @dataclass
 class BSPHardware:
@@ -262,9 +261,7 @@ class Superstep:
         in this superstep on this processor.
         
         Important: Data that was already communicated to this processor in an earlier
-        superstep does not need to be communicated again. We check this by looking at
-        all successors of the predecessor task - if any of them were already scheduled
-        on this processor in an earlier superstep, the data is already available.
+        superstep does not need to be communicated again.
         """
         # Track which data needs to be communicated to this processor
         # Key: (source_task, source_proc), Value: communication cost
@@ -297,22 +294,18 @@ class Superstep:
                         break
                 
                 if comm_instance:
-                    # Check if this data was already communicated to this processor
-                    # by checking if any successor of pred_task_name was scheduled on this processor before
+                    # Check if this data was already communicated to this processor in a previous superstep
                     data_already_available = False
                     
-                    # Get all successors of the predecessor task
-                    pred_successors = list(self.task_graph.successors(pred_task_name))
-                    
-                    # Check all previous supersteps
-                    for prev_superstep_idx in range(self.index):
+                    # Check all previous supersteps to see if this data was already communicated
+                    for prev_superstep_idx in range(1, self.index):
                         prev_superstep = self.schedule.supersteps[prev_superstep_idx]
                         prev_tasks = prev_superstep.tasks.get(processor, [])
                         
-                        # Check if any successor of pred_task_name was scheduled on this processor
+                        # Check if any task in the previous superstep on this processor needed this data
                         for prev_task in prev_tasks:
-                            if prev_task.node in pred_successors:
-                                # This processor already received the data from pred_task_name
+                            if pred_task_name in self.task_graph.predecessors(prev_task.node):
+                                # This processor already received this data in a previous superstep
                                 data_already_available = True
                                 break
                         
@@ -340,8 +333,8 @@ class Superstep:
                         key = (pred_task_name, comm_instance.proc)
                         data_to_communicate[key] = max(data_to_communicate.get(key, 0), exchange_time)
         
-        # Return the maximum communication time needed (all communications happen in parallel)
-        return max(data_to_communicate.values()) if data_to_communicate else 0.0
+        # Return the total exchange time for this processor
+        return sum(data_to_communicate.values()) if data_to_communicate else 0.0
 
     @property
     def compute_phase_start(self) -> float:
