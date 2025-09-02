@@ -10,7 +10,8 @@ from saga.schedulers import (
 )
 from saga.scheduler import Scheduler
 import saga_bsp as bsp
-from saga_bsp.schedulers import ListBSPScheduler
+from saga_bsp.misc.heft_busy_communication import HeftBusyCommScheduler
+from saga_bsp.schedulers import ListBSPScheduler, FillInSplitBSPScheduler
 
 from prepare import load_dataset, prepare_datasets
 
@@ -67,7 +68,9 @@ def create_schedulers(sync_time: float = 1.0) -> List[Scheduler]:
     schedulers = []
     
     # First, we add native async schedulers (without any BSP)
-    schedulers.extend([HeftScheduler(), CpopScheduler()])
+    schedulers.extend([
+        # HeftScheduler(), CpopScheduler(), 
+        HeftBusyCommScheduler()])
     
     # Then, we add async-to-BSP conversion schedulers
     for async_scheduler in [HeftScheduler()]:
@@ -86,18 +89,13 @@ def create_schedulers(sync_time: float = 1.0) -> List[Scheduler]:
         #             sa_max_iterations=50,
         #             sa_cooling_rate=0.95
         #         ), sync_time=sync_time))
-    schedulers.append(bsp.SagaSchedulerWrapper(ListBSPScheduler(), sync_time=sync_time, preprocess=True))
-        # for strategy, backfill_threshold in get_conversion_strategies():
-        #     schedulers.append(
-        #         bsp.SagaSchedulerWrapper(bsp.AsyncToBSPScheduler(
-        #             async_scheduler=async_scheduler,
-        #             strategy=strategy,
-        #             backfill_threshold_percent=backfill_threshold
-        #         ), sync_time=sync_time)
-        #     )
-            
-    # Finally, we add native BSP schedulers
-    # TODO: Add native BSP schedulers if available
+        
+    # Finally, we add native BSP schedulers    
+    # schedulers.append(bsp.SagaSchedulerWrapper(ListBSPScheduler(optimization_target="makespan"), sync_time=sync_time, preprocess=True))
+    # schedulers.append(bsp.SagaSchedulerWrapper(ListBSPScheduler(optimization_target="task_finish_time"), sync_time=sync_time, preprocess=True))
+    schedulers.append(bsp.SagaSchedulerWrapper(FillInSplitBSPScheduler(), sync_time=sync_time, preprocess=True))
+    
+
    
     return schedulers
 
@@ -180,6 +178,7 @@ def run_experiment(datadir: pathlib.Path,
             schedulers=schedulers,
             overwrite=overwrite
         )
+        
 
 
 def main():
@@ -200,13 +199,13 @@ def main():
     # Prepare datasets using SAGA's infrastructure
     prepare_datasets(savedir=datadir, skip_existing=True)
     
-    # Run BSP-only comparison
+    #Run BSP-only comparison
     run_experiment(
         datadir=datadir, 
         resultsdir=resultsdir, 
-        sync_time=1.0,
+        sync_time=0.0,
         num_jobs=10, 
-        trim=5,  # Limit to 10 instances for faster testing
+        trim=10,  # Limit to 10 instances for faster testing
         overwrite=False
     )
     
