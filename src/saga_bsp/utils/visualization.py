@@ -323,3 +323,139 @@ def print_bsp_schedule(schedule, title = "BSP Schedule"):
             if tasks:
                 task_info = ", ".join([f"{t.node}({t.duration:.1f})" for t in tasks])
                 print(f"    {proc}: {task_info}")
+
+
+def draw_busy_comm_gantt(schedule: Dict[Hashable, List],
+                         use_latex: bool = False,
+                         font_size: int = 16,
+                         tick_font_size: int = 14,
+                         figsize: Tuple[int, int] = (12, 6),
+                         title: Optional[str] = None,
+                         legend_loc: Optional[str] = 'upper right',
+                         axis: Optional[plt.Axes] = None,
+                         draw_task_labels: bool = True) -> plt.Axes:
+    """Draw Gantt chart for an asynchronous schedule with busy communication.
+    
+    Shows communication time (teal) and computation time (white) for each task.
+    Tasks with comm_time attribute will be visualized as two blocks:
+    - Teal block for communication (busy waiting/receiving data)
+    - White block for computation (actual task execution)
+    
+    Args:
+        schedule: Schedule dict mapping processors to task lists
+        use_latex: Whether to use LaTeX formatting
+        font_size: Font size for labels
+        tick_font_size: Font size for tick labels
+        figsize: Figure size
+        title: Optional title for the plot
+        legend_loc: Location for the legend (None for no legend)
+        axis: Existing axis to plot on
+        draw_task_labels: Whether to draw task labels
+        
+    Returns:
+        The matplotlib axis with the plot
+    """
+    rc_context_opts = {'text.usetex': use_latex}
+    with rc_context(rc=rc_context_opts):
+        
+        if axis is None:
+            _, axis = plt.subplots(figsize=figsize)
+            
+        # Get all processors
+        processors = sorted(schedule.keys())
+        
+        if not processors:
+            axis.text(0.5, 0.5, 'Empty Schedule', ha='center', va='center', transform=axis.transAxes)
+            return axis
+        
+        # Create y-position for each processor
+        y_pos = {proc: i for i, proc in enumerate(processors)}
+        
+        # Draw tasks
+        for proc, tasks in schedule.items():
+            y = y_pos[proc]
+            
+            for task in tasks:
+                # Check if task has comm_time attribute
+                if hasattr(task, 'comm_time') and task.comm_time > 0:
+                    # Draw communication block (teal - same as exchange phase)
+                    comm_start = task.start
+                    comm_duration = task.comm_time
+                    rect_comm = patches.Rectangle(
+                        (comm_start, y - 0.4), comm_duration, 0.8,
+                        linewidth=0.5, edgecolor='black', facecolor='#4ECDC4', alpha=0.7
+                    )
+                    axis.add_patch(rect_comm)
+                    
+                    # Add label for communicated predecessors if available
+                    if hasattr(task, 'comm_predecessors') and task.comm_predecessors and comm_duration > 0:
+                        # Create label like "T1,T2" for the predecessors being received
+                        pred_label = ','.join(task.comm_predecessors)
+                        axis.text(
+                            comm_start + comm_duration / 2, y,
+                            pred_label, ha='center', va='center',
+                            color='black', fontsize=font_size - 4, style='italic'
+                        )
+                    
+                    # Draw computation block (white with black border - same as tasks in draw_bsp_gantt)
+                    comp_start = task.start + task.comm_time
+                    comp_duration = task.end - comp_start
+                    rect_comp = patches.Rectangle(
+                        (comp_start, y - 0.4), comp_duration, 0.8,
+                        linewidth=1.0, edgecolor='black', facecolor='#FFFFFF'
+                    )
+                    axis.add_patch(rect_comp)
+                    
+                    # Add task label in the computation block (black text, bold)
+                    if draw_task_labels and comp_duration > 0:
+                        axis.text(
+                            comp_start + comp_duration / 2, y,
+                            task.name, ha='center', va='center',
+                            color='black', fontsize=font_size - 2, weight='bold'
+                        )
+                else:
+                    # Draw single block for tasks without communication (white with black border)
+                    rect = patches.Rectangle(
+                        (task.start, y - 0.4), task.end - task.start, 0.8,
+                        linewidth=1.0, edgecolor='black', facecolor='#FFFFFF'
+                    )
+                    axis.add_patch(rect)
+                    
+                    # Add task label (black text, bold)
+                    if draw_task_labels and task.end - task.start > 0:
+                        axis.text(
+                            task.start + (task.end - task.start) / 2, y,
+                            task.name, ha='center', va='center',
+                            color='black', fontsize=font_size - 2, weight='bold'
+                        )
+        
+        # Set axis properties
+        axis.set_yticks(range(len(processors)))
+        axis.set_yticklabels(processors)
+        axis.set_ylim(-0.5, len(processors) - 0.5)
+        
+        # Set x-axis limits
+        max_time = max(task.end for tasks in schedule.values() for task in tasks) if any(schedule.values()) else 1
+        axis.set_xlim(0, max_time * 1.05)
+        
+        # Labels and title
+        axis.set_xlabel('Time', fontsize=font_size)
+        axis.set_ylabel('Processors', fontsize=font_size)
+        if title:
+            axis.set_title(title, fontsize=font_size + 2)
+        
+        # Grid and formatting
+        axis.grid(True, alpha=0.3, axis='x')
+        axis.tick_params(axis='both', which='major', labelsize=tick_font_size)
+        
+        # Add legend with consistent colors
+        if legend_loc is not None:
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='#4ECDC4', edgecolor='black', alpha=0.7, label='Communication'),
+                Patch(facecolor='#FFFFFF', edgecolor='black', label='Computation')
+            ]
+            axis.legend(handles=legend_elements, loc=legend_loc, fontsize=font_size - 2)
+        
+        plt.tight_layout()
+        return axis
