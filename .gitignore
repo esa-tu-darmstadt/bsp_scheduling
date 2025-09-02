@@ -6,3 +6,5 @@
 *.egg-info
 *.pkl
 *.txt
+*.prof
+*.pgf
