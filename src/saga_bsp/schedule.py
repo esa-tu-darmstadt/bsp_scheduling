@@ -100,9 +100,10 @@ class BSPTask:
         # return self.superstep.tasks[self.proc][self.index - 1].rel_end
         
         # Instead, lets calculate it iteratively
-        return sum(
-            task.duration for task in self.superstep.tasks[self.proc][:index_]
-        )
+        sum_ = 0.0
+        for task in self.superstep.tasks[self.proc][:index_]:
+            sum_ += task.duration
+        return sum_
 
     @property
     def rel_end(self) -> float:
