@@ -468,7 +468,7 @@ class BSPSchedule:
         # Shouldn't reach here, but just in case
         return self.add_superstep()
     
-    def split_superstep(self, superstep: Superstep, split_time: float) -> Superstep:
+    def split_superstep(self, superstep: Superstep, split_time: float, threshold_point: Literal["start", "midpoint"]) -> Superstep:
         """Split a superstep at a given absolute time, moving tasks that start after this time to a new superstep.
         Always returns a new superstep (which may be empty if no tasks are moved).
 
@@ -477,7 +477,10 @@ class BSPSchedule:
         Args:
             superstep: The superstep to split
             split_time: The absolute time at which to split the superstep
-            
+            threshold_point: The strategy for deciding whether a task instance belongs to the old or new superstep.
+            For "start", tasks that start at or after split_time will be moved to the new superstep.
+            For "midpoint", tasks whose midpoint (start + duration/2) is at or after split_time will be moved.
+
         Returns:
             The new superstep (may be empty if no tasks were moved)
 
@@ -497,10 +500,15 @@ class BSPSchedule:
         # Identify specific task instances that should be moved to the new superstep
         for processor, task_list in list(superstep.tasks.items()):
             for task_instance in list(task_list):  # Create a copy to iterate safely
-                # Check if this specific task instance starts at or after the split time (absolute)
-                if task_instance.start >= split_time:
-                    task_instances_to_move.append(task_instance)
-        
+                if threshold_point == "start":
+                    # Check if this specific task instance starts at or after the split time (absolute)
+                    if task_instance.start >= split_time:
+                        task_instances_to_move.append(task_instance)
+                elif threshold_point == "midpoint":
+                    # Check if this specific task instance's midpoint is at or after the split time
+                    if task_instance.start + task_instance.duration / 2 >= split_time:
+                        task_instances_to_move.append(task_instance)
+
         # Always create a new superstep (even if empty)
         new_superstep = Superstep(self)
         
