@@ -298,12 +298,29 @@ class Superstep:
                     if local_instance:
                         continue
 
-                    # Find the instance to communicate from (earliest in previous supersteps)
+                    # Find the instance to communicate from (fastest link among previous supersteps)
                     comm_instance = None
+                    best_comm_time = float('inf')
+                    comm_weight = self.task_graph.edges[(pred_task_name, task.node)]['weight']
+
                     for pred_instance in pred_instances:
                         if pred_instance.superstep.index < self.index:
-                            comm_instance = pred_instance
-                            break
+                            source_proc = pred_instance.proc
+
+                            # Calculate communication time for this instance
+                            if self.network.has_edge(source_proc, dest_proc):
+                                network_speed = self.network.edges[source_proc, dest_proc]['weight']
+                            elif self.network.has_edge(dest_proc, source_proc):
+                                network_speed = self.network.edges[dest_proc, source_proc]['weight']
+                            else:
+                                continue  # Skip if no connection exists
+
+                            potential_comm_time = comm_weight / network_speed
+
+                            # Choose instance with fastest communication
+                            if potential_comm_time < best_comm_time:
+                                best_comm_time = potential_comm_time
+                                comm_instance = pred_instance
 
                     if comm_instance:
                         # Check if data was already communicated in a previous superstep
@@ -319,20 +336,9 @@ class Superstep:
                                 break
 
                         if not data_already_available:
-                            # Calculate communication time
-                            comm_weight = self.task_graph.edges[(pred_task_name, task.node)]['weight']
+                            # Use the already calculated best communication time
                             source_proc = comm_instance.proc
-
-                            if self.network.has_edge(source_proc, dest_proc):
-                                network_speed = self.network.edges[source_proc, dest_proc]['weight']
-                            else:
-                                raise ValueError(
-                                    f"Task wants to communicate between processors {source_proc} and {dest_proc}, "
-                                    "but no connection exists in the network."
-                                )
-
-                            comm_time = comm_weight / network_speed
-                            edges.append((source_proc, dest_proc, pred_task_name, task.node, comm_time))
+                            edges.append((source_proc, dest_proc, pred_task_name, task.node, best_comm_time))
 
         return edges
 
