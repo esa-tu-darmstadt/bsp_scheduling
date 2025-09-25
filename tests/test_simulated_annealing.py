@@ -8,7 +8,8 @@ from src.saga_bsp.optimization import (
     BSPSimulatedAnnealing, 
     MoveTaskToSuperstep, 
     MoveTaskToProcessor, 
-    DuplicateAndMoveTask
+    DuplicateAndMoveTask,
+    MergeSupersteps
 )
 
 
@@ -133,13 +134,17 @@ class TestBSPSimulatedAnnealing(unittest.TestCase):
         """Test MoveTaskToSuperstep feasibility checking"""
         schedule = self.create_suboptimal_schedule()
         
+        # Get task instances
+        t2_instance = schedule.get_primary_instance("T2")
+        t4_instance = schedule.get_primary_instance("T4")
+        
         # Test valid move: T2 from superstep 1 to superstep 2
         action = MoveTaskToSuperstep(2)
-        self.assertTrue(action.is_feasible(schedule, "T2"))
+        self.assertTrue(action.is_feasible(schedule, t2_instance))
         
         # Test invalid move: T4 to superstep 0 (would violate precedence)
         action = MoveTaskToSuperstep(0)
-        self.assertFalse(action.is_feasible(schedule, "T4"))
+        self.assertFalse(action.is_feasible(schedule, t4_instance))
     
     def test_move_task_to_processor_feasibility(self):
         """Test MoveTaskToProcessor feasibility checking with intra-superstep dependencies"""
@@ -157,12 +162,16 @@ class TestBSPSimulatedAnnealing(unittest.TestCase):
         schedule.schedule("T3", "P2", ss2)
         schedule.schedule("T5", "P2", ss2)
         
+        # Get task instances
+        t4_instance = schedule.get_primary_instance("T4")
+        t2_instance = schedule.get_primary_instance("T2")
+        
         # T4 cannot be moved to different processor because it depends on T2 in same superstep
         action = MoveTaskToProcessor("P2")
-        self.assertFalse(action.is_feasible(schedule, "T4"))
+        self.assertFalse(action.is_feasible(schedule, t4_instance))
         
         # T2 can be moved because it has no intra-superstep dependencies
-        self.assertTrue(action.is_feasible(schedule, "T2"))
+        self.assertTrue(action.is_feasible(schedule, t2_instance))
     
     def test_duplicate_and_move_task_action(self):
         """Test DuplicateAndMoveTask action"""
@@ -171,34 +180,33 @@ class TestBSPSimulatedAnnealing(unittest.TestCase):
         # Create scenario with intra-superstep dependencies
         ss0 = schedule.add_superstep()
         schedule.schedule("T1", "P0", ss0)
+        schedule.schedule("T2", "P0", ss0)  # T2 depends on T1, same superstep, same processor
         
         ss1 = schedule.add_superstep()
-        schedule.schedule("T2", "P1", ss1)
-        schedule.schedule("T4", "P1", ss1)  # T4 depends on T2
+        schedule.schedule("T3", "P1", ss1)
+        schedule.schedule("T4", "P1", ss1)  
+        schedule.schedule("T5", "P2", ss1)
         
-        ss2 = schedule.add_superstep()
-        schedule.schedule("T3", "P2", ss2)
-        schedule.schedule("T5", "P2", ss2)
+        # Get T2 instance  
+        t2_instance = schedule.get_primary_instance("T2")
         
-        initial_makespan = schedule.makespan
+        # DuplicateAndMoveTask should be able to handle moving T2 to P1
+        action = DuplicateAndMoveTask("P1")
+        self.assertTrue(action.is_feasible(schedule, t2_instance))
         
-        # DuplicateAndMoveTask should be able to handle this
-        action = DuplicateAndMoveTask("P2")
-        self.assertTrue(action.is_feasible(schedule, "T4"))
-        
-        # Apply the action
-        success = action.apply(schedule, "T4")
+        # Apply the action - should duplicate T1 to P1 and move T2 to P1
+        success = action.apply(schedule, t2_instance)
         self.assertTrue(success)
         
         # Verify schedule is still valid
         is_valid, errors = schedule.is_valid()
         self.assertTrue(is_valid, f"Schedule invalid after duplication: {errors}")
         
-        # T2 should now be duplicated on P2
-        t2_tasks = [task for task in schedule.task_mapping.values() if task.node == "T2"]
-        processors_with_t2 = set(task.proc for task in t2_tasks)
-        self.assertIn("P1", processors_with_t2)  # Original
-        self.assertIn("P2", processors_with_t2)  # Duplicate
+        # T1 should now be duplicated on P1 (because T2 was moved there and depends on T1)
+        t1_tasks = schedule.get_all_instances("T1")
+        processors_with_t1 = set(task.proc for task in t1_tasks)
+        self.assertIn("P0", processors_with_t1)  # Original
+        self.assertIn("P1", processors_with_t1)  # Duplicate
     
     def test_simulated_annealing_finds_improvement(self):
         """Test that simulated annealing finds better solutions"""
@@ -244,6 +252,7 @@ class TestBSPSimulatedAnnealing(unittest.TestCase):
             max_temp=20.0,
             min_temp=0.01,
             cooling_rate=0.95,
+            # Temporarily exclude MergeSupersteps until bugs are fixed
             action_types=[MoveTaskToSuperstep, MoveTaskToProcessor, DuplicateAndMoveTask]
         )
         
@@ -289,11 +298,16 @@ class TestBSPSimulatedAnnealing(unittest.TestCase):
         for src, dst, weight in edges:
             complex_graph.add_edge(src, dst, weight=weight)
         
-        # Create bad initial schedule
+        # Create bad initial schedule - put each task in separate superstep respecting dependencies
         schedule = BSPSchedule(self.hardware, complex_graph)
-        for i, task in enumerate(sorted(complex_graph.nodes()), 1):
-            ss = schedule.add_superstep() if i == 1 else schedule.supersteps[-1] if i % 2 == 0 else schedule.add_superstep()
-            schedule.schedule(task, "P0", ss)  # All on slow processor
+        
+        # Simple topological sort to get valid ordering
+        task_order = list(nx.topological_sort(complex_graph))
+        
+        # Put each task in its own superstep on slow processor
+        for task in task_order:
+            ss = schedule.add_superstep()
+            schedule.schedule(task, "P0", ss)
         
         initial_makespan = schedule.makespan
         
@@ -359,14 +373,22 @@ class TestScheduleActions(unittest.TestCase):
         ss2 = schedule.add_superstep()
         schedule.schedule("C", "P0", ss2)
         
+        b_instance = schedule.get_primary_instance("B")
         action = MoveTaskToSuperstep(0)  # Dummy
-        targets = action.get_possible_targets(schedule, "B")
+        targets = action.get_possible_targets(b_instance)
         
-        # B can move to superstep 2 (after A, before C)
-        self.assertIn(2, targets)
-        # B cannot move to superstep 0 (before A) or stay in superstep 1
-        self.assertNotIn(0, targets)
-        self.assertNotIn(1, targets)
+        # B can now move to superstep 0 (after A) or superstep 2 (before C)
+        self.assertEqual(sorted(targets), [0, 2])
+        
+        # A can move to superstep 1 (before B)
+        a_instance = schedule.get_primary_instance("A")
+        a_targets = action.get_possible_targets(a_instance)
+        self.assertEqual(a_targets, [1])
+        
+        # C can move to superstep 1 (after B)
+        c_instance = schedule.get_primary_instance("C")
+        c_targets = action.get_possible_targets(c_instance)
+        self.assertEqual(c_targets, [1])
     
     def test_move_task_to_processor_get_possible_targets(self):
         """Test getting possible processor targets"""
@@ -375,8 +397,9 @@ class TestScheduleActions(unittest.TestCase):
         ss0 = schedule.add_superstep()
         schedule.schedule("A", "P0", ss0)
         
+        a_instance = schedule.get_primary_instance("A")
         action = MoveTaskToProcessor("")  # Dummy
-        targets = action.get_possible_targets(schedule, "A")
+        targets = action.get_possible_targets(a_instance)
         
         # A can move to P1 but not P0 (already there)
         self.assertEqual(targets, ["P1"])
@@ -393,14 +416,17 @@ class TestScheduleActions(unittest.TestCase):
         ss1 = schedule.add_superstep()
         schedule.schedule("C", "P1", ss1)
         
+        # Get B instance
+        b_instance = schedule.get_primary_instance("B")
+        
         # Move B to P1 should duplicate A
         action = DuplicateAndMoveTask("P1")
-        success = action.apply(schedule, "B")
+        success = action.apply(schedule, b_instance)
         
         self.assertTrue(success)
         
         # A should now exist on both processors
-        a_tasks = [task for task in schedule.task_mapping.values() if task.node == "A"]
+        a_tasks = schedule.get_all_instances("A")
         a_processors = set(task.proc for task in a_tasks)
         self.assertEqual(len(a_processors), 2)
         self.assertIn("P0", a_processors)
@@ -409,6 +435,132 @@ class TestScheduleActions(unittest.TestCase):
         # Verify schedule validity
         is_valid, errors = schedule.is_valid()
         self.assertTrue(is_valid, f"Schedule after duplication invalid: {errors}")
+    
+    def test_duplicate_and_move_transitive_dependencies(self):
+        """Test that DuplicateAndMoveTask handles transitive dependencies correctly"""
+        # Create task graph with transitive dependencies: T1 → T2 → T3 → T4
+        transitive_graph = nx.DiGraph()
+        transitive_graph.add_node("T1", weight=10.0)
+        transitive_graph.add_node("T2", weight=10.0) 
+        transitive_graph.add_node("T3", weight=10.0)
+        transitive_graph.add_node("T4", weight=10.0)
+        transitive_graph.add_edge("T1", "T2", weight=1.0)
+        transitive_graph.add_edge("T2", "T3", weight=1.0)
+        transitive_graph.add_edge("T3", "T4", weight=1.0)
+        
+        schedule = BSPSchedule(self.hardware, transitive_graph)
+        
+        # Put all tasks on P0 in same superstep
+        ss0 = schedule.add_superstep()
+        schedule.schedule("T1", "P0", ss0)
+        schedule.schedule("T2", "P0", ss0)
+        schedule.schedule("T3", "P0", ss0)
+        schedule.schedule("T4", "P0", ss0)
+        
+        # Move T4 to P1 - should duplicate T1, T2, T3 in correct order
+        t4_instance = schedule.get_primary_instance("T4")
+        action = DuplicateAndMoveTask("P1")
+        
+        # Test internal method
+        tasks_to_duplicate = action._get_required_duplicates(
+            schedule, "T4", "P0", ss0
+        )
+        self.assertEqual(tasks_to_duplicate, ["T1", "T2", "T3"])
+        
+        # Apply the action
+        success = action.apply(schedule, t4_instance)
+        self.assertTrue(success)
+        
+        # Verify validity
+        is_valid, errors = schedule.is_valid()
+        self.assertTrue(is_valid, f"Schedule invalid after transitive duplication: {errors}")
+        
+        # Check that all dependencies are duplicated on P1
+        p1_tasks = [t.node for t in schedule.supersteps[0].tasks["P1"]]
+        self.assertEqual(p1_tasks, ["T1", "T2", "T3", "T4"])
+        
+        # Verify all tasks exist on both processors
+        for task_name in ["T1", "T2", "T3"]:
+            instances = schedule.get_all_instances(task_name)
+            processors = set(inst.proc for inst in instances)
+            self.assertEqual(processors, {"P0", "P1"}, f"Task {task_name} should be on both processors")
+        
+        # T4 should only be on P1 now
+        t4_instances = schedule.get_all_instances("T4")
+        t4_processors = set(inst.proc for inst in t4_instances)
+        self.assertEqual(t4_processors, {"P1"}, "T4 should only be on P1 after move")
+    
+    def test_merge_supersteps_action(self):
+        """Test MergeSupersteps action"""
+        schedule = BSPSchedule(self.hardware, self.task_graph)
+        
+        # Create schedule with tasks spread across multiple supersteps
+        ss0 = schedule.add_superstep()
+        schedule.schedule("A", "P0", ss0)
+        
+        ss1 = schedule.add_superstep()
+        schedule.schedule("B", "P0", ss1)  # B depends on A
+        
+        ss2 = schedule.add_superstep()
+        schedule.schedule("C", "P1", ss2)  # C depends on B, different processor
+        
+        initial_supersteps = len(schedule.supersteps)
+        self.assertEqual(initial_supersteps, 3)
+        
+        # Get a dummy task instance for the action interface
+        dummy_task = schedule.get_primary_instance("A")
+        
+        # Test merging supersteps 1 and 2 (B and C can be in same superstep - different processors)
+        action = MergeSupersteps(1)
+        self.assertTrue(action.is_feasible(schedule, dummy_task))
+        
+        success = action.apply(schedule, dummy_task)
+        self.assertTrue(success)
+        
+        # Should now have 2 supersteps instead of 3
+        self.assertEqual(len(schedule.supersteps), 2)
+        
+        # B and C should now be in same superstep (index 1)
+        b_instance = schedule.get_primary_instance("B")
+        c_instance = schedule.get_primary_instance("C")
+        self.assertEqual(b_instance.superstep.index, 1)
+        self.assertEqual(c_instance.superstep.index, 1)
+        
+        # Verify validity
+        is_valid, errors = schedule.is_valid()
+        self.assertTrue(is_valid, f"Schedule invalid after merge: {errors}")
+    
+    def test_merge_supersteps_with_dependencies(self):
+        """Test merging supersteps with intra-processor dependencies"""
+        schedule = BSPSchedule(self.hardware, self.task_graph)
+        
+        # Create schedule where A and B are on same processor in adjacent supersteps
+        ss0 = schedule.add_superstep()
+        schedule.schedule("A", "P0", ss0)
+        
+        ss1 = schedule.add_superstep()
+        schedule.schedule("B", "P0", ss1)  # B depends on A, same processor
+        
+        ss2 = schedule.add_superstep()
+        schedule.schedule("C", "P0", ss2)  # C depends on B, same processor
+        
+        dummy_task = schedule.get_primary_instance("A")
+        
+        # Test merging supersteps 0 and 1 (A and B)
+        action = MergeSupersteps(0)
+        self.assertTrue(action.is_feasible(schedule, dummy_task))
+        
+        success = action.apply(schedule, dummy_task)
+        self.assertTrue(success)
+        
+        # Should maintain dependency order: A before B
+        merged_superstep = schedule.supersteps[0]
+        p0_tasks = [t.node for t in merged_superstep.tasks["P0"]]
+        self.assertEqual(p0_tasks, ["A", "B"])
+        
+        # Verify validity
+        is_valid, errors = schedule.is_valid()
+        self.assertTrue(is_valid, f"Schedule invalid after merge with dependencies: {errors}")
 
 
 if __name__ == '__main__':

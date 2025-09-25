@@ -79,41 +79,46 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
                         )
                         axis.add_patch(rect)
                 
-                # Draw exchange phase  
-                if superstep.exchange_time > 0:
-                    exchange_start = start_time + superstep.sync_time
+                # Draw exchange phase (per-processor exchange times)
+                if superstep.max_exchange_time > 0:
                     for proc in all_processors:
-                        rect = patches.Rectangle(
-                            (exchange_start, y_positions[proc] - 0.4),
-                            superstep.exchange_time, 0.8,
-                            facecolor=colors['exchange'],
-                            edgecolor='black', 
-                            alpha=0.7,
-                            linewidth=0.5
-                        )
-                        axis.add_patch(rect)
+                        # Get processor-specific exchange time
+                        proc_exchange_time = superstep.exchange_time(proc) if proc in superstep.tasks else 0.0
+                        if proc_exchange_time > 0:
+                            exchange_start = start_time + superstep.sync_time
+                            rect = patches.Rectangle(
+                                (exchange_start, y_positions[proc] - 0.4),
+                                proc_exchange_time, 0.8,
+                                facecolor=colors['exchange'],
+                                edgecolor='black',
+                                alpha=0.7,
+                                linewidth=0.5
+                            )
+                            axis.add_patch(rect)
             
             # Draw computation phase with individual tasks
-            compute_start = superstep.compute_phase_start
-            
             for proc, tasks in superstep.tasks.items():
                 y_pos = y_positions[proc]
-                
+
+                # Get processor-specific compute phase start
+                proc_compute_start = superstep.compute_phase_start(proc)
+                proc_compute_time = superstep.compute_time(proc)
+
                 # Draw background compute phase
-                if show_phases and superstep.compute_time > 0:
+                if show_phases and proc_compute_time > 0:
                     rect = patches.Rectangle(
-                        (compute_start, y_pos - 0.4),
-                        superstep.compute_time, 0.8,
+                        (proc_compute_start, y_pos - 0.4),
+                        proc_compute_time, 0.8,
                         facecolor=colors['compute'],
                         edgecolor='black',
                         alpha=0.3,
                         linewidth=0.5
                     )
                     axis.add_patch(rect)
-                
+
                 # Draw individual tasks
                 for task in tasks:
-                    task_start = compute_start + task.rel_start
+                    task_start = proc_compute_start + task.rel_start
                     task_duration = task.duration
                     
                     # Task rectangle
@@ -189,8 +194,8 @@ def draw_superstep_breakdown(bsp_schedule: BSPSchedule,
     
     superstep_indices = list(range(len(bsp_schedule.supersteps)))
     sync_times = [ss.sync_time for ss in bsp_schedule.supersteps]
-    exchange_times = [ss.exchange_time for ss in bsp_schedule.supersteps]
-    compute_times = [ss.compute_time for ss in bsp_schedule.supersteps]
+    exchange_times = [ss.max_exchange_time for ss in bsp_schedule.supersteps]
+    compute_times = [ss.max_compute_time for ss in bsp_schedule.supersteps]
     total_times = [ss.total_time for ss in bsp_schedule.supersteps]
     
     # Stacked bar chart
@@ -270,8 +275,9 @@ def draw_tile_activity(bsp_schedule: BSPSchedule,
         for i, proc in enumerate(processors):
             if proc in superstep.tasks:
                 # Mark computation phase as active
-                compute_start = superstep.compute_phase_start
-                compute_end = superstep.end_time
+                compute_start = superstep.compute_phase_start(proc)
+                # Compute end is the start plus the processor's compute time
+                compute_end = compute_start + superstep.compute_time(proc)
                 
                 start_bin = int((compute_start / max_time) * (time_resolution - 1))
                 end_bin = int((compute_end / max_time) * (time_resolution - 1))
@@ -305,24 +311,140 @@ def draw_tile_activity(bsp_schedule: BSPSchedule,
     plt.tight_layout()
     return axis
 
-def print_bsp_schedule(schedule, title = "BSP Schedule"):
-    """Print schedule details"""
+def print_bsp_schedule(schedule, title = "BSP Schedule", show_per_processor_comm=False):
+    """Print schedule details
+
+    Args:
+        schedule: The BSP schedule to print
+        title: Title for the output
+        show_per_processor_comm: If True, show per-processor communication breakdown
+    """
     print(f"\n{title}")
     print("=" * len(title))
     print(f"Makespan: {schedule.makespan:.2f}")
     print(f"Number of supersteps: {schedule.num_supersteps}")
-    
+
     for i, superstep in enumerate(schedule.supersteps):
         print(f"\nSuperstep {i} (start: {superstep.start_time:.2f}, end: {superstep.end_time:.2f}):")
         print(f"  Sync time: {superstep.sync_time:.2f}")
-        print(f"  Exchange time: {superstep.exchange_time:.2f}")
-        print(f"  Compute time: {superstep.compute_time:.2f}")
+        print(f"  Max exchange time: {superstep.max_exchange_time:.2f}")
+        print(f"  Max compute time: {superstep.max_compute_time:.2f}")
         print(f"  Total time: {superstep.total_time:.2f}")
-        
+
+        if show_per_processor_comm and superstep.edges_to_communicate:
+            print(f"  Communication edges:")
+            for source_proc, dest_proc, source_task, dest_task, comm_time in superstep.edges_to_communicate:
+                print(f"    {source_task}@{source_proc} -> {dest_task}@{dest_proc}: {comm_time:.2f}")
+
         for proc, tasks in superstep.tasks.items():
             if tasks:
                 task_info = ", ".join([f"{t.node}({t.duration:.1f})" for t in tasks])
-                print(f"    {proc}: {task_info}")
+                if show_per_processor_comm:
+                    send_time = superstep.send_time(proc)
+                    recv_time = superstep.receive_time(proc)
+                    exch_time = superstep.exchange_time(proc)
+                    comp_time = superstep.compute_time(proc)
+                    print(f"    {proc}: tasks=[{task_info}], send={send_time:.2f}, recv={recv_time:.2f}, exch={exch_time:.2f}, comp={comp_time:.2f}")
+                else:
+                    print(f"    {proc}: {task_info}")
+
+
+def draw_processor_comm_breakdown(bsp_schedule: BSPSchedule,
+                                 superstep_idx: Optional[int] = None,
+                                 figsize: Tuple[int, int] = (12, 8),
+                                 font_size: int = 12) -> plt.Figure:
+    """Visualize per-processor send/receive/exchange times for supersteps.
+
+    Args:
+        bsp_schedule: The BSP schedule to analyze
+        superstep_idx: If provided, show only this superstep. Otherwise show all.
+        figsize: Figure size
+        font_size: Font size for labels
+
+    Returns:
+        The matplotlib figure
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # Determine which supersteps to show
+    if superstep_idx is not None:
+        if 0 <= superstep_idx < len(bsp_schedule.supersteps):
+            supersteps = [bsp_schedule.supersteps[superstep_idx]]
+            indices = [superstep_idx]
+        else:
+            raise ValueError(f"Invalid superstep index: {superstep_idx}")
+    else:
+        supersteps = bsp_schedule.supersteps
+        indices = list(range(len(supersteps)))
+
+    if not supersteps:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(0.5, 0.5, 'No supersteps', ha='center', va='center', transform=ax.transAxes)
+        return fig
+
+    # Collect all processors
+    all_processors = set()
+    for ss in supersteps:
+        all_processors.update(ss.tasks.keys())
+    processors = sorted(list(all_processors))
+
+    if not processors:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(0.5, 0.5, 'No processors', ha='center', va='center', transform=ax.transAxes)
+        return fig
+
+    # Create subplots: one for send times, one for receive times, one for exchange times
+    fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
+
+    # Prepare data
+    send_data = np.zeros((len(processors), len(supersteps)))
+    recv_data = np.zeros((len(processors), len(supersteps)))
+    exch_data = np.zeros((len(processors), len(supersteps)))
+
+    for j, ss in enumerate(supersteps):
+        for i, proc in enumerate(processors):
+            if proc in ss.tasks:
+                send_data[i, j] = ss.send_time(proc)
+                recv_data[i, j] = ss.receive_time(proc)
+                exch_data[i, j] = ss.exchange_time(proc)
+
+    # Create heatmaps
+    data_sets = [
+        (send_data, 'Send Times', axes[0]),
+        (recv_data, 'Receive Times', axes[1]),
+        (exch_data, 'Exchange Times (max of send/receive)', axes[2])
+    ]
+
+    for data, title, ax in data_sets:
+        im = ax.imshow(data, cmap='YlOrRd', aspect='auto')
+        ax.set_title(title, fontsize=font_size + 2)
+        ax.set_yticks(range(len(processors)))
+        ax.set_yticklabels(processors, fontsize=font_size)
+
+        # Add text annotations
+        for i in range(len(processors)):
+            for j in range(len(supersteps)):
+                if data[i, j] > 0:
+                    ax.text(j, i, f'{data[i, j]:.1f}',
+                           ha="center", va="center", color="black",
+                           fontsize=font_size - 2)
+
+        # Add colorbar
+        plt.colorbar(im, ax=ax)
+
+    # Set x-axis labels only on bottom plot
+    axes[-1].set_xticks(range(len(indices)))
+    axes[-1].set_xticklabels([f'SS{idx}' for idx in indices], fontsize=font_size)
+    axes[-1].set_xlabel('Superstep', fontsize=font_size)
+
+    # Set y-axis label
+    axes[1].set_ylabel('Processors', fontsize=font_size)
+
+    plt.suptitle('Per-Processor Communication Breakdown', fontsize=font_size + 4)
+    plt.tight_layout()
+
+    return fig
 
 
 def draw_busy_comm_gantt(schedule: Dict[Hashable, List],

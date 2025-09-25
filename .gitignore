@@ -8,3 +8,6 @@
 *.txt
 *.prof
 *.pgf
+*.DS_Store
+__pycache__/
+*.dot

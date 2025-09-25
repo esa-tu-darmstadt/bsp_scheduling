@@ -44,6 +44,8 @@ class HeftBusyCommScheduler(Scheduler):
     communication times), then the task is computed.
     """
 
+    name = "HEFT (Busy Comm)"
+
     @staticmethod
     def get_runtimes(
         network: nx.Graph, task_graph: nx.DiGraph

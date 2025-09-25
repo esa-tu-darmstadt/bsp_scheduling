@@ -11,7 +11,7 @@ from saga.schedulers import (
 from saga.scheduler import Scheduler
 import saga_bsp as bsp
 from saga_bsp.misc.heft_busy_communication import HeftBusyCommScheduler
-from saga_bsp.schedulers import ListBSPScheduler, FillInSplitBSPScheduler
+from saga_bsp.schedulers import ListBSPScheduler, FillInSplitBSPScheduler, BCSHScheduler
 
 from prepare import load_dataset, prepare_datasets
 
@@ -93,7 +93,10 @@ def create_schedulers(sync_time: float = 1.0) -> List[Scheduler]:
     # Finally, we add native BSP schedulers    
     # schedulers.append(bsp.SagaSchedulerWrapper(ListBSPScheduler(optimization_target="makespan"), sync_time=sync_time, preprocess=True))
     # schedulers.append(bsp.SagaSchedulerWrapper(ListBSPScheduler(optimization_target="task_finish_time"), sync_time=sync_time, preprocess=True))
-    schedulers.append(bsp.SagaSchedulerWrapper(FillInSplitBSPScheduler(), sync_time=sync_time, preprocess=True))
+    schedulers.append(bsp.SagaSchedulerWrapper(FillInSplitBSPScheduler(priority_mode='heft'), sync_time=sync_time, preprocess=True))
+    schedulers.append(bsp.SagaSchedulerWrapper(FillInSplitBSPScheduler(priority_mode='cpop'), sync_time=sync_time, preprocess=True))
+    schedulers.append(bsp.SagaSchedulerWrapper(BCSHScheduler(use_eft=False), sync_time=sync_time, preprocess=True))
+    schedulers.append(bsp.SagaSchedulerWrapper(BCSHScheduler(use_eft=True), sync_time=sync_time, preprocess=True))
     
 
    
@@ -181,37 +184,82 @@ def run_experiment(datadir: pathlib.Path,
         
 
 
+def generate_dataset_statistics(datadir: pathlib.Path, outputdir: pathlib.Path):
+    """Generate comprehensive statistics for all datasets."""
+    from dataset_statistics import analyze_dataset, save_dataset_statistics, generate_dot_files
+
+    stats_dir = outputdir.joinpath("dataset_statistics")
+    dot_dir = outputdir.joinpath("dot_files")
+
+    # Get all dataset files
+    dataset_files = list(datadir.glob("*.json"))
+
+    for dataset_file in dataset_files:
+        dataset_name = dataset_file.stem
+
+        # Check if statistics JSON already exists
+        json_stats_file = stats_dir / f"{dataset_name}_statistics.json"
+        if json_stats_file.exists():
+            print(f"Statistics for {dataset_name} already exist, skipping...")
+            continue
+
+        print(f"\nProcessing dataset: {dataset_name}")
+
+        try:
+            # Load dataset
+            dataset = load_dataset(datadir, dataset_name)
+
+            # Analyze dataset statistics
+            stats = analyze_dataset(dataset, max_instances=100)
+
+            # Save statistics
+            save_dataset_statistics(stats, stats_dir)
+
+            # Generate sample DOT files
+            generate_dot_files(dataset, dot_dir, num_samples=1)
+
+        except Exception as e:
+            print(f"Error processing dataset {dataset_name}: {e}")
+            continue
+
+    print(f"\nDataset statistics saved to: {stats_dir}")
+    print(f"DOT files saved to: {dot_dir}")
+
+
 def main():
     logging.basicConfig(level=logging.INFO)
-    
+
     # Increase recursion limit for large task graphs
-    sys.setrecursionlimit(100000) 
-    
+    sys.setrecursionlimit(100000)
+
     # # Apply WFCommons compatibility patch
     # print("Applying WFCommons compatibility patch...")
     # from wfcommons_patch import patch_wfcommons
     # patch_wfcommons()
-    
+
     datadir = thisdir.joinpath("data")
     outputdir = thisdir.joinpath("output")
     resultsdir = thisdir.joinpath("results")
-    
+
     # Prepare datasets using SAGA's infrastructure
     prepare_datasets(savedir=datadir, skip_existing=True)
-    
+
+    # Generate comprehensive dataset statistics
+    generate_dataset_statistics(datadir=datadir, outputdir=outputdir)
+
     #Run BSP-only comparison
     run_experiment(
-        datadir=datadir, 
-        resultsdir=resultsdir, 
+        datadir=datadir,
+        resultsdir=resultsdir,
         sync_time=0.0,
-        num_jobs=10, 
+        num_jobs=5,
         trim=10,  # Limit to 10 instances for faster testing
         overwrite=False
     )
-    
+
     # Run analysis on the results
     from postprocessing import run_bsp_analysis
-    run_bsp_analysis(resultsdir=resultsdir, outputdir=outputdir)
+    run_bsp_analysis(resultsdir=resultsdir, outputdir=outputdir, datadir=datadir)
     
     
 

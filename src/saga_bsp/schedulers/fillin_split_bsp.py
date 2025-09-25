@@ -1,7 +1,10 @@
 """Fill-in/Split BSP Scheduler with three-phase placement strategy.
 
-This scheduler uses upward rank for task prioritization and implements a three-phase
-placement strategy in strict priority order:
+This scheduler supports two priority modes:
+- HEFT mode: Uses upward rank for task prioritization (default)
+- CPOP mode: Uses upward + downward rank for task prioritization
+
+Implements a three-phase placement strategy in strict priority order:
 1. Fill-in: Try to place tasks in holes of existing supersteps
 2. Append: If dependency-ready time is in last superstep, try appending
 3. Split: Create new superstep or split existing one
@@ -15,7 +18,7 @@ from .base import BSPScheduler
 from .. import draw_bsp_gantt
 from ..schedule import BSPSchedule, BSPHardware, Superstep
 import networkx as nx
-from saga.schedulers.cpop import upward_rank
+from saga.schedulers.cpop import upward_rank, cpop_ranks
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +36,9 @@ class PrioritizedTask:
 
 class FillInSplitBSPScheduler(BSPScheduler):
     """Fill-in/Split BSP scheduler with three-phase placement strategy.
-    
+
     This scheduler:
-    1. Computes upward rank for all tasks
+    1. Computes task priority using HEFT (upward rank) or CPOP (upward + downward rank)
     2. Processes tasks in priority order
     3. For each task, tries strategies in order:
        - Phase 1: Fill-in (find holes in existing supersteps)
@@ -44,17 +47,23 @@ class FillInSplitBSPScheduler(BSPScheduler):
     4. Uses first successful strategy (early exit)
     """
     
-    def __init__(self, verbose: bool = False, draw_after_each_step: bool = False):
+    def __init__(self, verbose: bool = False, draw_after_each_step: bool = False,
+                 priority_mode: str = "heft"):
         """Initialize the Fill-in/Split BSP scheduler.
-        
+
         Args:
             verbose: Enable detailed logging
             draw_after_each_step: Enable drawing Gantt chart after each scheduling step
+            priority_mode: Priority calculation mode - "heft" (upward rank only) or "cpop" (upward + downward rank)
         """
         super().__init__()
-        self.name = "FillInSplitBSP"
+        self.priority_mode = priority_mode.lower()
+        self.name = "FillInSplit+" + self.priority_mode.capitalize()
         self.verbose = verbose
         self.draw_after_each_step = draw_after_each_step
+
+        if self.priority_mode not in ["heft", "cpop"]:
+            raise ValueError(f"Invalid priority_mode: {priority_mode}. Must be 'heft' or 'cpop'")
         
         # Initialize statistics
         self._reset_stats()
@@ -89,8 +98,11 @@ class FillInSplitBSPScheduler(BSPScheduler):
         # Initialize schedule
         schedule = BSPSchedule(hardware, task_graph)
         
-        # Compute task priorities using upward rank
-        rank = upward_rank(hardware.network, task_graph)
+        # Compute task priorities based on selected mode
+        if self.priority_mode == "heft":
+            rank = upward_rank(hardware.network, task_graph)
+        else:  # cpop mode
+            rank = cpop_ranks(hardware.network, task_graph)
         
         # Initialize priority queue
         queue = PriorityQueue()
@@ -100,7 +112,8 @@ class FillInSplitBSPScheduler(BSPScheduler):
             if task_graph.in_degree(task) == 0:
                 queue.put(PrioritizedTask(rank[task], task))
                 if self.verbose:
-                    logger.debug(f"Task {task} added to initial queue with rank {rank[task]}")
+                    mode_str = "HEFT" if self.priority_mode == "heft" else "CPOP"
+                    logger.debug(f"Task {task} added to initial queue with {mode_str} rank {rank[task]}")
         
         # Create initial superstep if needed
         if not schedule.supersteps:
@@ -114,7 +127,8 @@ class FillInSplitBSPScheduler(BSPScheduler):
             task_name = task_item.task
             
             if self.verbose:
-                logger.debug(f"\n#{task_num}: Processing task {task_name} with rank {rank[task_name]}")
+                mode_str = "HEFT" if self.priority_mode == "heft" else "CPOP"
+                logger.debug(f"\n#{task_num}: Processing task {task_name} with {mode_str} rank {rank[task_name]}")
             
             # Try placement strategies in priority order
             placed = False
@@ -162,7 +176,8 @@ class FillInSplitBSPScheduler(BSPScheduler):
                 if all(schedule.task_scheduled(pred) for pred in task_graph.predecessors(successor)):
                     queue.put(PrioritizedTask(rank[successor], successor))
                     if self.verbose:
-                        logger.debug(f"  Task {successor} became ready with rank {rank[successor]}")
+                        mode_str = "HEFT" if self.priority_mode == "heft" else "CPOP"
+                        logger.debug(f"  Task {successor} became ready with {mode_str} rank {rank[successor]}")
             
             # Optionally draw Gantt chart after each step
             if self.draw_after_each_step:
@@ -214,7 +229,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
             task_graph: Task dependency graph
             
         Returns:
-            Total communication time needed (maximum since communications happen in parallel)
+            Total communication time needed
         """
         comm_time = 0.0
         
@@ -275,24 +290,21 @@ class FillInSplitBSPScheduler(BSPScheduler):
                 task_duration = self._calculate_task_duration(task_name, processor, hardware, task_graph)
                 
                 # Current end time of processor in this superstep
-                proc_end_time = superstep.compute_time_of_processor(processor)
+                proc_end_time = superstep.compute_phase_start(processor) + superstep.compute_time(processor)
                 
                 # Would the task fit in a hole?
                 task_finish_time = proc_end_time + task_duration
-                superstep_compute_time = superstep.compute_time
+                superstep_end_time = superstep.end_time
                 
                 # Check if there's a hole (task fits without extending superstep)
-                if task_finish_time <= superstep_compute_time + 0.001:  # Small tolerance
-                    # Calculate absolute finish time for comparison
-                    abs_finish_time = superstep.compute_phase_start + task_finish_time
-                    
-                    if abs_finish_time < best_finish_time:
-                        best_finish_time = abs_finish_time
+                if task_finish_time <= superstep_end_time + 0.00001:  # Small tolerance
+                    if task_finish_time < best_finish_time:
+                        best_finish_time = task_finish_time
                         best_processor = processor
                         best_superstep = superstep
                         
                         if self.verbose:
-                            hole_size = superstep_compute_time - proc_end_time
+                            hole_size = superstep_end_time - proc_end_time
                             logger.debug(f"    Found fill-in opportunity: superstep {superstep.index}, "
                                        f"proc {processor}, hole_size={hole_size:.2f}")
         
@@ -339,7 +351,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
                 task_duration = self._calculate_task_duration(task_name, processor, hardware, task_graph)
                 
                 # Calculate finish time
-                proc_end_time = last_superstep.compute_time_of_processor(processor)
+                proc_end_time = last_superstep.compute_time(processor)
                 task_finish_relative = proc_end_time + task_duration
                 task_finish_absolute = last_superstep.compute_phase_start + task_finish_relative
                 
@@ -411,13 +423,9 @@ class FillInSplitBSPScheduler(BSPScheduler):
             # Calculate task duration including communication
             task_duration = self._calculate_task_duration(task_name, processor, hardware, task_graph) + \
                             self._calculate_communication_time(task_name, processor, superstep, schedule, hardware, task_graph)
-
-            # Get current processor end time in the superstep
-            proc_end_time = superstep.compute_time_of_processor(processor)
             
             # Calculate when task would approximately finish
-            task_finish_relative = proc_end_time + task_duration
-            task_finish_absolute = superstep.compute_phase_start + task_finish_relative
+            task_finish_absolute = superstep.compute_phase_start(processor) + superstep.compute_time(processor) + task_duration
             
             if task_finish_absolute < best_finish_time:
                 best_finish_time = task_finish_absolute
@@ -463,7 +471,8 @@ class FillInSplitBSPScheduler(BSPScheduler):
     def print_stats(self):
         """Print scheduling statistics."""
         print("\n" + "="*50)
-        print("Fill-in/Split BSP Scheduler Statistics")
+        mode_str = "HEFT" if self.priority_mode == "heft" else "CPOP"
+        print(f"Fill-in/Split BSP Scheduler Statistics ({mode_str} priority mode)")
         print("="*50)
         print(f"Tasks scheduled:         {self.stats['tasks_scheduled']}")
         print(f"Placement strategies:")

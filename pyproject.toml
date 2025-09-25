@@ -6,7 +6,7 @@ authors = [
 ]
 description = "Bulk Synchronous Parallel (BSP) scheduling extension for Saga"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -15,7 +15,7 @@ classifiers = [
 ]
 dependencies = [
     "scipy<1.16",
-    "wfcommons==1.0",
+    "wfcommons==1.2", # ==1.0
     "anrg.saga>=0.0.11"
 ]
 license = "MIT"
@@ -27,5 +27,6 @@ dev = [
 ]
 visualization = [
     "matplotlib",
-    "pygraphviz"
+    "pygraphviz",
+    "tikzplotlib",
 ]

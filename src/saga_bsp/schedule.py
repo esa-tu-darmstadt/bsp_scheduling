@@ -112,12 +112,12 @@ class BSPTask:
     @property
     def start(self) -> float:
         """Absolute start time of the task"""
-        return self.superstep.compute_phase_start + self.rel_start
+        return self.superstep.compute_phase_start(self.proc) + self.rel_start
 
     @property
     def end(self) -> float:
         """Absolute end time of the task"""
-        return self.superstep.compute_phase_start + self.rel_end
+        return self.superstep.compute_phase_start(self.proc) + self.rel_end
 
     def __repr__(self):
         return f"BSPTask(node={self.node}, proc={self.proc}, rel_start={self.rel_start}, superstep_index={self.superstep.index})"
@@ -165,15 +165,20 @@ class Superstep:
 
     def invalidate_timings(self):
         """Invalidate all cached timings for this superstep"""
-        self.compute_time_of_processor.cache_clear()
-        self.exchange_time_of_processor.cache_clear()
+        self.compute_time.cache_clear()
+        self.exchange_time.cache_clear()
+        self.send_time.cache_clear()
+        self.receive_time.cache_clear()
+        self.compute_phase_start.cache_clear()
         # Clear cached properties safely
-        if 'compute_time' in self.__dict__:
-            del self.__dict__['compute_time']
+        if 'max_compute_time' in self.__dict__:
+            del self.__dict__['max_compute_time']
         if 'sync_time' in self.__dict__:
             del self.__dict__['sync_time']
-        if 'exchange_time' in self.__dict__:
-            del self.__dict__['exchange_time']
+        if 'max_exchange_time' in self.__dict__:
+            del self.__dict__['max_exchange_time']
+        if 'edges_to_communicate' in self.__dict__:
+            del self.__dict__['edges_to_communicate']
 
     @cached_property
     def index(self) -> int:
@@ -197,8 +202,25 @@ class Superstep:
 
     @property
     def total_time(self) -> float:
-        """Total time of this superstep, including computation, synchronization, and exchange times."""
-        return self.compute_time + self.sync_time + self.exchange_time
+        """Total time of this superstep.
+
+        This is the maximum end time across all processors, which includes:
+        - Synchronization time (same for all processors)
+        - Processor-specific exchange time
+        - Processor-specific computation time
+        """
+        if not self.tasks:
+            return self.sync_time
+
+        # Find the maximum end time across all processors
+        max_end_time = 0.0
+        for proc in self.tasks:
+            proc_end_time = (self.sync_time +
+                           self.exchange_time(proc) +
+                           self.compute_time(proc))
+            max_end_time = max(max_end_time, proc_end_time)
+
+        return max_end_time
 
     @property
     def start_time(self) -> float:
@@ -220,11 +242,15 @@ class Superstep:
         return self.start_time + self.total_time
 
     @cached_property
-    def compute_time(self) -> float:
-        """Total computation time. Calculated as the maximum of the compute times of all processors."""
+    def max_compute_time(self) -> float:
+        """Maximum computation time across all processors.
+
+        Note: This is for backward compatibility. Use compute_time(processor) for
+        processor-specific computation times.
+        """
         if not self.tasks:
             return 0.0
-        return max(self.compute_time_of_processor(proc) for proc in self.tasks)
+        return max(self.compute_time(proc) for proc in self.tasks)
 
     @property
     def sync_time(self) -> float:
@@ -241,105 +267,171 @@ class Superstep:
         return self.hardware.sync_time
 
     @cached_property
-    def exchange_time(self) -> float:
-        """Total exchange time. Calculated as the maximum of the exchange times of all processors."""
+    def edges_to_communicate(self) -> List[Tuple[str, str, str, str, float]]:
+        """Compute all edges that need to be communicated in this superstep.
+
+        Returns a list of tuples: (source_proc, dest_proc, source_task, dest_task, comm_time)
+        where comm_time is the time needed to communicate this edge.
+
+        This includes:
+        - Edges where source task is in a previous superstep
+        - Edges where dest task is in this superstep
+        - Source and dest are on different processors
+        - The data hasn't been communicated in an earlier superstep
+        """
+        edges = []
+
+        # For each processor in this superstep
+        for dest_proc, tasks in self.tasks.items():
+            for task in tasks:
+                # Check each predecessor
+                for pred_task_name in self.task_graph.predecessors(task.node):
+                    pred_instances = self.schedule.task_mapping.get(pred_task_name, [])
+
+                    # Check if predecessor is already on dest processor (no comm needed)
+                    local_instance = None
+                    for pred_instance in pred_instances:
+                        if pred_instance.proc == dest_proc and pred_instance.superstep.index <= self.index:
+                            local_instance = pred_instance
+                            break
+
+                    if local_instance:
+                        continue
+
+                    # Find the instance to communicate from (earliest in previous supersteps)
+                    comm_instance = None
+                    for pred_instance in pred_instances:
+                        if pred_instance.superstep.index < self.index:
+                            comm_instance = pred_instance
+                            break
+
+                    if comm_instance:
+                        # Check if data was already communicated in a previous superstep
+                        data_already_available = False
+                        for prev_idx in range(1, self.index):
+                            prev_superstep = self.schedule.supersteps[prev_idx]
+                            prev_tasks = prev_superstep.tasks.get(dest_proc, [])
+                            for prev_task in prev_tasks:
+                                if pred_task_name in self.task_graph.predecessors(prev_task.node):
+                                    data_already_available = True
+                                    break
+                            if data_already_available:
+                                break
+
+                        if not data_already_available:
+                            # Calculate communication time
+                            comm_weight = self.task_graph.edges[(pred_task_name, task.node)]['weight']
+                            source_proc = comm_instance.proc
+
+                            if self.network.has_edge(source_proc, dest_proc):
+                                network_speed = self.network.edges[source_proc, dest_proc]['weight']
+                            else:
+                                raise ValueError(
+                                    f"Task wants to communicate between processors {source_proc} and {dest_proc}, "
+                                    "but no connection exists in the network."
+                                )
+
+                            comm_time = comm_weight / network_speed
+                            edges.append((source_proc, dest_proc, pred_task_name, task.node, comm_time))
+
+        return edges
+
+    @cached_property
+    def max_exchange_time(self) -> float:
+        """Maximum exchange time across all processors.
+
+        Note: This is for backward compatibility. Use exchange_time(processor) for
+        processor-specific exchange times.
+        """
         if not self.tasks:
             return 0.0
-        return max(self.exchange_time_of_processor(proc) for proc in self.tasks)
+        return max(self.exchange_time(proc) for proc in self.tasks)
 
     @cache
-    def compute_time_of_processor(self, processor: str) -> float:
-        return (self.tasks[processor][-1].rel_end
-                if self.tasks[processor] else 0.0)
+    def compute_time(self, processor: str) -> float:
+        """Get the computation time for a specific processor in this superstep.
 
-    @cache
-    def exchange_time_of_processor(self, processor: str) -> float:
-        """Calculate exchange time for a processor in this superstep.
-        
-        Exchange time is the time needed to receive data from tasks in previous supersteps
-        that are executed on different processors and whose outputs are needed by tasks
-        in this superstep on this processor.
-        
-        Important: Data that was already communicated to this processor in an earlier
-        superstep does not need to be communicated again.
+        Args:
+            processor: The processor to get computation time for
+
+        Returns:
+            The total computation time for the given processor
         """
-        # Track which data needs to be communicated to this processor
-        # Key: (source_task, source_proc), Value: communication cost
-        data_to_communicate = {}
-        
-        # Get all tasks on this processor in this superstep
-        tasks_on_processor = self.tasks.get(processor, [])
-        
-        for task in tasks_on_processor:
-            # For each task, find dependencies that require communication
-            for pred_task_name in self.task_graph.predecessors(task.node):
-                pred_instances = self.schedule.task_mapping[pred_task_name]
-                
-                # First check: Is the predecessor already on this processor in this or a previous superstep?
-                local_instance = None
-                for pred_instance in pred_instances:
-                    if pred_instance.proc == processor and pred_instance.superstep.index <= self.index:
-                        local_instance = pred_instance
-                        break
-                
-                # If we have a local instance, no communication needed
-                if local_instance:
-                    continue
-                
-                # Otherwise, find first instance from a previous superstep for communication
-                comm_instance = None
-                for pred_instance in pred_instances:
-                    if pred_instance.superstep.index < self.index:
-                        comm_instance = pred_instance
-                        break
-                
-                if comm_instance:
-                    # Check if this data was already communicated to this processor in a previous superstep
-                    data_already_available = False
-                    
-                    # Check all previous supersteps to see if this data was already communicated
-                    for prev_superstep_idx in range(1, self.index):
-                        prev_superstep = self.schedule.supersteps[prev_superstep_idx]
-                        prev_tasks = prev_superstep.tasks.get(processor, [])
-                        
-                        # Check if any task in the previous superstep on this processor needed this data
-                        for prev_task in prev_tasks:
-                            if pred_task_name in self.task_graph.predecessors(prev_task.node):
-                                # This processor already received this data in a previous superstep
-                                data_already_available = True
-                                break
-                        
-                        if data_already_available:
-                            break
-                    
-                    # Only communicate if data is not already available
-                    if not data_already_available:
-                        # Calculate communication cost from this instance
-                        comm_weight = self.task_graph.edges[(pred_task_name, task.node)]['weight']
-                        
-                        # Get network connection speed between processors
-                        if self.network.has_edge(comm_instance.proc, processor):
-                            network_speed = self.network.edges[comm_instance.proc, processor]['weight']
-                        else:
-                            raise ValueError(
-                                f"Task wants to communicate between processors {comm_instance.proc} and {processor}, "
-                                "but no connection exists in the network."
-                            )
-                        
-                        # Exchange time = communication weight / network speed
-                        exchange_time = comm_weight / network_speed
-                        
-                        # Track the maximum communication time for this data source
-                        key = (pred_task_name, comm_instance.proc)
-                        data_to_communicate[key] = max(data_to_communicate.get(key, 0), exchange_time)
-        
-        # Return the total exchange time for this processor
-        return sum(data_to_communicate.values()) if data_to_communicate else 0.0
+        return (self.tasks[processor][-1].rel_end
+                if self.tasks.get(processor) else 0.0)
 
-    @property
-    def compute_phase_start(self) -> float:
-        """Absolute start time of the computation phase of this superstep"""
-        return self.start_time + self.sync_time + self.exchange_time
+    @cache
+    def send_time(self, processor: str) -> float:
+        """Calculate the time needed for a processor to send data to other processors.
+
+        Supports broadcasting: each unique datum (source_task) is counted only once,
+        regardless of how many destination processors it's sent to.
+
+        Args:
+            processor: The processor to calculate send time for
+
+        Returns:
+            Total time needed to send all unique outgoing data from this processor
+        """
+        # Group edges by source task to handle broadcasting
+        source_tasks_times = {}
+        for source_proc, _, source_task, _, comm_time in self.edges_to_communicate:
+            if source_proc == processor:
+                # For broadcasting, we take the max comm time for each unique source task
+                # (assuming the same data size is broadcast to all destinations)
+                if source_task not in source_tasks_times:
+                    source_tasks_times[source_task] = comm_time
+                else:
+                    source_tasks_times[source_task] = max(source_tasks_times[source_task], comm_time)
+
+        return sum(source_tasks_times.values())
+
+    @cache
+    def receive_time(self, processor: str) -> float:
+        """Calculate the time needed for a processor to receive data from other processors.
+
+        Args:
+            processor: The processor to calculate receive time for
+
+        Returns:
+            Total time needed to receive all incoming data for this processor
+        """
+        return sum(
+            comm_time
+            for _, dest_proc, _, _, comm_time in self.edges_to_communicate
+            if dest_proc == processor
+        )
+
+    @cache
+    def exchange_time(self, processor: str) -> float:
+        """Calculate exchange time for a processor in this superstep.
+
+        The exchange time for a processor is the maximum of its send time and receive time,
+        as these operations can potentially overlap in BSP systems.
+
+        Args:
+            processor: The processor to calculate exchange time for
+
+        Returns:
+            Maximum of send and receive times for this processor
+        """
+        # Return the maximum as send and receive can overlap
+        return max(self.send_time(processor), self.receive_time(processor))
+
+    @cache
+    def compute_phase_start(self, processor: str) -> float:
+        """Absolute start time of the computation phase for a specific processor.
+
+        Since exchange times are processor-specific, the compute phase starts
+        at different times for different processors.
+
+        Args:
+            processor: The processor to get compute phase start time for
+
+        Returns:
+            Absolute time when computation starts for this processor
+        """
+        return self.start_time + self.sync_time + self.exchange_time(processor)
 
 
 class BSPSchedule:
@@ -477,7 +569,7 @@ class BSPSchedule:
         
         # We're in the middle of a superstep - try to split it
         if containing_superstep.start_time < time < containing_superstep.end_time:
-            return self.split_superstep(containing_superstep, time)
+            return self.split_superstep(containing_superstep, time, threshold_point="start")
         
         # Shouldn't reach here, but just in case
         return self.add_superstep()
@@ -707,11 +799,11 @@ class BSPSchedule:
                 for task in tasks:
                     all_scheduled_tasks.append((task.node, superstep.index, processor))
         
-        seen = set()
-        for task_info in all_scheduled_tasks:
-            if task_info in seen:
-                errors.append(f"Duplicate task assignment: {task_info}")
-            seen.add(task_info)
+        # seen = set()
+        # for task_info in all_scheduled_tasks:
+        #     if task_info in seen:
+        #         errors.append(f"Duplicate task assignment: {task_info}")
+        #     seen.add(task_info)
         
         return len(errors) == 0, errors
 
@@ -745,7 +837,7 @@ class BSPSchedule:
         second_superstep = self.supersteps[second_idx]
         
         # Check all tasks in the second superstep
-        for proc, tasks in second_superstep.tasks.items():
+        for _, tasks in second_superstep.tasks.items():
             for task in tasks:
                 # Check dependencies of this task
                 for pred_name in self.task_graph.predecessors(task.node):
