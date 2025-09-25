@@ -52,6 +52,7 @@ def main():
                        help='Specific schedulers to benchmark (default: all)')
     parser.add_argument('--max-instances', type=int, default=5,
                        help='Maximum instances per dataset for benchmarking (default: 5, 0 = no limit)')
+    parser.add_argument('--verbose', action='store_true', help='Enable debug logging')
     
     parser.add_argument('--clean-datasets', action='store_true',
                        help='Clean up existing datasets')
@@ -64,6 +65,14 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
+    
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+        logging.getLogger('dataset_generator').setLevel(logging.DEBUG)
+        logging.getLogger('benchmark_runner').setLevel(logging.DEBUG)
+        logging.getLogger('schedulers').setLevel(logging.DEBUG)
+        logging.getLogger('visualizations').setLevel(logging.DEBUG)
+        logging.getLogger('solver_statistics').setLevel(logging.DEBUG)
 
     # Create directories
     args.datadir.mkdir(parents=True, exist_ok=True)
@@ -95,13 +104,15 @@ def main():
     # Step 2: Run benchmarks
     if not args.skip_benchmarking:
         logger.info("Running benchmarks...")
+        schedules_viz_dir = args.visdir / "schedules"
         runner.run_all_benchmarks(
             datadir=args.datadir,
             resultsdir=args.resultsdir,
             dataset_names=args.datasets,
             num_jobs=args.num_jobs,
             overwrite=args.overwrite,
-            max_instances=args.max_instances
+            max_instances=args.max_instances,
+            visualization_dir=schedules_viz_dir
         )
 
     # Step 3: Generate visualizations

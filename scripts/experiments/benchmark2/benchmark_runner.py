@@ -13,16 +13,30 @@ import pandas as pd
 from joblib import Parallel, delayed
 
 from dataset_generator import DatasetGenerator, TaskGraphMetadata
+from schedule_visualizer import save_schedule_visualization, should_save_visualization
 
 logger = logging.getLogger(__name__)
 
 
-def run_single_scheduler_task(scheduler_name, scheduler, task_graph, bsp_hardware, metadata, task_graph_idx):
+def run_single_scheduler_task(scheduler_name, scheduler, task_graph, bsp_hardware, metadata, task_graph_idx,
+                             dataset_name=None, visualization_dir=None):
     """Run a single scheduler on a single task graph."""
+    logger.debug(f"Running scheduler {scheduler_name} on task graph {task_graph_idx}")
     try:
         # All schedulers now use the unified interface
         result = scheduler.schedule(bsp_hardware, task_graph)
         makespan = result['makespan']
+
+        # Save schedule visualization for first task graph of each dataset/scheduler
+        if (visualization_dir is not None and dataset_name is not None and
+            should_save_visualization(task_graph_idx, dataset_name, scheduler_name)):
+            save_schedule_visualization(
+                schedule_result=result,
+                scheduler_name=scheduler_name,
+                dataset_name=dataset_name,
+                task_graph_idx=task_graph_idx,
+                output_dir=visualization_dir
+            )
 
         return {
             'scheduler_name': scheduler_name,
@@ -53,7 +67,8 @@ class BenchmarkRunner:
 
     def run_dataset_benchmark(self, dataset_name: str, task_graphs: List, bsp_hardware_list: List,
                              metadata_list: List[TaskGraphMetadata], resultsdir: pathlib.Path,
-                             num_jobs: int = 1, overwrite: bool = False, max_instances: int = 5) -> None:
+                             num_jobs: int = 1, overwrite: bool = False, max_instances: int = 5,
+                             visualization_dir: Optional[pathlib.Path] = None) -> None:
         """Run benchmark on a specific dataset.
 
         Args:
@@ -65,6 +80,7 @@ class BenchmarkRunner:
             num_jobs: Number of parallel jobs
             overwrite: Whether to overwrite existing results
             max_instances: Maximum number of task graphs to use for benchmarking
+            visualization_dir: Directory to save schedule visualizations (optional)
         """
         savepath = resultsdir / f"{dataset_name}.csv"
         if savepath.exists() and not overwrite:
@@ -84,15 +100,15 @@ class BenchmarkRunner:
         tasks = []
         for i, (task_graph, bsp_hardware, metadata) in enumerate(zip(task_graphs, bsp_hardware_list, metadata_list)):
             for scheduler_name, scheduler in self.schedulers.items():
-                tasks.append((scheduler_name, scheduler, task_graph, bsp_hardware, metadata, i))
+                tasks.append((scheduler_name, scheduler, task_graph, bsp_hardware, metadata, i, dataset_name, visualization_dir))
 
         logger.info(f"Running {len(tasks)} scheduler-task combinations in parallel with {num_jobs} jobs")
 
         # Execute all combinations in parallel
         parallel_results = Parallel(n_jobs=num_jobs, verbose=1)(
             delayed(run_single_scheduler_task)(
-                scheduler_name, scheduler, task_graph, bsp_hardware, metadata, task_graph_idx
-            ) for scheduler_name, scheduler, task_graph, bsp_hardware, metadata, task_graph_idx in tasks
+                scheduler_name, scheduler, task_graph, bsp_hardware, metadata, task_graph_idx, dataset_name, visualization_dir
+            ) for scheduler_name, scheduler, task_graph, bsp_hardware, metadata, task_graph_idx, dataset_name, visualization_dir in tasks
         )
 
         # Filter out None results (failed executions)
@@ -133,7 +149,8 @@ class BenchmarkRunner:
 
     def run_all_benchmarks(self, datadir: pathlib.Path, resultsdir: pathlib.Path,
                           dataset_names: Optional[List[str]] = None, num_jobs: int = 1,
-                          overwrite: bool = False, max_instances: int = 5) -> None:
+                          overwrite: bool = False, max_instances: int = 5,
+                          visualization_dir: Optional[pathlib.Path] = None) -> None:
         """Run benchmarks on all datasets.
 
         Args:
@@ -143,6 +160,7 @@ class BenchmarkRunner:
             num_jobs: Number of parallel jobs
             overwrite: Whether to overwrite existing results
             max_instances: Maximum number of instances per dataset (0 = no limit)
+            visualization_dir: Directory to save schedule visualizations (optional)
         """
         generator = DatasetGenerator(cache_dir=datadir)
 
@@ -178,7 +196,8 @@ class BenchmarkRunner:
                     resultsdir=resultsdir,
                     num_jobs=num_jobs,
                     overwrite=overwrite,
-                    max_instances=max_instances
+                    max_instances=max_instances,
+                    visualization_dir=visualization_dir
                 )
 
             except Exception as e:
