@@ -8,8 +8,8 @@ including the async HeftBusyCommScheduler and BSP schedulers.
 from typing import List, Dict, Optional
 import logging
 
-# Import SAGA schedulers
-from saga.schedulers import HeftScheduler, CpopScheduler
+# Import optimized delay model schedulers (replaces slow SAGA schedulers)
+from saga_bsp.schedulers.delaymodel import HeftScheduler
 
 # Import BSP schedulers and utilities
 from saga_bsp.misc.heft_busy_communication import HeftBusyCommScheduler
@@ -150,6 +150,10 @@ def create_bsp_schedulers() -> Dict[str, object]:
     schedulers["HeftBusyCommScheduler"] = UnifiedSchedulerWrapper(
         HeftBusyCommScheduler()
     )
+    
+    # schedulers["Heft"] = UnifiedSchedulerWrapper(
+    #     HeftScheduler()
+    # )
 
     # 2. Async-to-BSP conversion schedulers - auto-detected as bsp
     heft_async = HeftScheduler()

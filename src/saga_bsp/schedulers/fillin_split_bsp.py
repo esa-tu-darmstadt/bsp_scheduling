@@ -18,7 +18,7 @@ from .base import BSPScheduler
 from .. import draw_bsp_gantt
 from ..schedule import BSPSchedule, BSPHardware, Superstep
 import networkx as nx
-from saga.schedulers.cpop import upward_rank, cpop_ranks
+from .delaymodel.priorities import upward_rank, cpop_ranks
 
 logger = logging.getLogger(__name__)
 

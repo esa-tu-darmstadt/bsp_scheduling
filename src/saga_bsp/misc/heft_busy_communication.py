@@ -7,16 +7,55 @@ communication periods. Communication and computation form a single contiguous bl
 
 import logging
 import pathlib
-from typing import Dict, Hashable, List, Tuple
+from typing import Dict, Hashable, List
 
 import networkx as nx
 import numpy as np
 
 from saga.scheduler import Scheduler, Task
-from saga.schedulers.cpop import upward_rank
 from saga.utils.tools import get_insert_loc
 
 thisdir = pathlib.Path(__file__).resolve().parent
+
+
+def upward_rank(network: nx.Graph, task_graph: nx.DiGraph) -> Dict[Hashable, float]:
+    """Optimized upward rank calculation that pre-computes averages."""
+    ranks = {}
+
+    # Pre-calculate average computation time for each task (across all processors)
+    avg_comp_times = {}
+    for task in task_graph.nodes:
+        task_weight = task_graph.nodes[task]['weight']
+        avg_comp_times[task] = np.mean([
+            task_weight / network.nodes[node]['weight']
+            for node in network.nodes
+        ])
+
+    # Pre-calculate average communication time for each edge (across all network links)
+    avg_comm_times = {}
+    network_speeds = [network.edges[src, dst]['weight'] for src, dst in network.edges]
+    avg_network_speed = np.mean(network_speeds)
+
+    for src_task, dst_task in task_graph.edges:
+        edge_weight = task_graph.edges[src_task, dst_task]['weight']
+        avg_comm_times[(src_task, dst_task)] = edge_weight / avg_network_speed
+
+    # Calculate ranks in reverse topological order
+    topological_order = list(nx.topological_sort(task_graph))
+    for task in topological_order[::-1]:
+        avg_comp_time = avg_comp_times[task]
+
+        # Find maximum successor rank + communication time
+        max_comm_time = 0.0
+        if task_graph.out_degree(task) > 0:
+            max_comm_time = max(
+                ranks[successor] + avg_comm_times.get((task, successor), 0.0)
+                for successor in task_graph.successors(task)
+            )
+
+        ranks[task] = avg_comp_time + max_comm_time
+
+    return ranks
 
 
 def heft_rank_sort(network: nx.Graph, task_graph: nx.DiGraph) -> List[Hashable]:
@@ -47,65 +86,57 @@ class HeftBusyCommScheduler(Scheduler):
     name = "HEFT (Busy Comm)"
 
     @staticmethod
-    def get_runtimes(
-        network: nx.Graph, task_graph: nx.DiGraph
-    ) -> Tuple[
-        Dict[Hashable, Dict[Hashable, float]],
-        Dict[Tuple[Hashable, Hashable], Dict[Tuple[Hashable, Hashable], float]],
-    ]:
-        """Get the expected runtimes of all tasks on all nodes.
+    def calculate_runtime(network: nx.Graph, task_graph: nx.DiGraph, node: Hashable, task: Hashable) -> float:
+        """Calculate runtime of a task on a specific node.
 
         Args:
             network (nx.Graph): The network graph.
             task_graph (nx.DiGraph): The task graph.
+            node: The processor node.
+            task: The task to calculate runtime for.
 
         Returns:
-            Tuple containing:
-                - Dictionary mapping nodes to tasks and their runtimes
-                - Dictionary mapping edges to task dependencies and their communication times
+            float: The runtime of the task on the node.
         """
-        runtimes = {}
-        for node in network.nodes:
-            runtimes[node] = {}
-            speed: float = network.nodes[node]["weight"]
-            for task in task_graph.nodes:
-                cost: float = task_graph.nodes[task]["weight"]
-                runtimes[node][task] = cost / speed
-                logging.debug(
-                    "Task %s on node %s has runtime %s",
-                    task,
-                    node,
-                    runtimes[node][task],
-                )
+        speed: float = network.nodes[node]["weight"]
+        cost: float = task_graph.nodes[task]["weight"]
+        return cost / speed
 
-        commtimes = {}
-        for src, dst in network.edges:
-            commtimes[src, dst] = {}
-            commtimes[dst, src] = {}
-            speed: float = network.edges[src, dst]["weight"]
-            for src_task, dst_task in task_graph.edges:
-                cost = task_graph.edges[src_task, dst_task]["weight"]
-                commtimes[src, dst][src_task, dst_task] = cost / speed
-                commtimes[dst, src][src_task, dst_task] = cost / speed
-                logging.debug(
-                    "Task %s on node %s to task %s on node %s has communication time %s",
-                    src_task,
-                    src,
-                    dst_task,
-                    dst,
-                    commtimes[src, dst][src_task, dst_task],
-                )
+    @staticmethod
+    def calculate_commtime(network: nx.Graph, task_graph: nx.DiGraph,
+                          src_node: Hashable, dst_node: Hashable,
+                          src_task: Hashable, dst_task: Hashable) -> float:
+        """Calculate communication time between two tasks on different nodes.
 
-        return runtimes, commtimes
+        Args:
+            network (nx.Graph): The network graph.
+            task_graph (nx.DiGraph): The task graph.
+            src_node: Source processor node.
+            dst_node: Destination processor node.
+            src_task: Source task.
+            dst_task: Destination task.
+
+        Returns:
+            float: The communication time between the tasks.
+        """
+        if src_node == dst_node:
+            return 0.0
+
+        # Get network edge speed (bidirectional)
+        if network.has_edge(src_node, dst_node):
+            speed: float = network.edges[src_node, dst_node]["weight"]
+        elif network.has_edge(dst_node, src_node):
+            speed: float = network.edges[dst_node, src_node]["weight"]
+        else:
+            raise ValueError(f"No network connection between {src_node} and {dst_node}")
+
+        cost = task_graph.edges[src_task, dst_task]["weight"]
+        return cost / speed
 
     def _schedule(
         self,
         network: nx.Graph,
         task_graph: nx.DiGraph,
-        runtimes: Dict[Hashable, Dict[Hashable, float]],
-        commtimes: Dict[
-            Tuple[Hashable, Hashable], Dict[Tuple[Hashable, Hashable], float]
-        ],
         schedule_order: List[Hashable],
     ) -> Dict[Hashable, List[Task]]:
         """Schedule the tasks on the network with busy communication.
@@ -113,8 +144,6 @@ class HeftBusyCommScheduler(Scheduler):
         Args:
             network (nx.Graph): The network graph.
             task_graph (nx.DiGraph): The task graph.
-            runtimes: Dictionary mapping nodes to tasks and their runtimes.
-            commtimes: Dictionary mapping edges to task dependencies and their communication times.
             schedule_order: The order in which to schedule the tasks.
 
         Returns:
@@ -143,12 +172,12 @@ class HeftBusyCommScheduler(Scheduler):
                     
                     if parent_task.node != node:
                         # Need communication from different processor
-                        comm_time = commtimes[(parent_task.node, node)][(parent, task_name)]
+                        comm_time = self.calculate_commtime(network, task_graph, parent_task.node, node, parent, task_name)
                         total_comm_time += comm_time  # Sum all communication times
                         comm_predecessors.append(parent)  # Track this predecessor
                 
                 # Total duration of this task (communication + computation as one block)
-                runtime = runtimes[node][task_name]
+                runtime = self.calculate_runtime(network, task_graph, node, task_name)
                 total_duration = total_comm_time + runtime
                 
                 # Find earliest time this task can start (when all parents are done)
@@ -163,15 +192,15 @@ class HeftBusyCommScheduler(Scheduler):
                 task_start = start_time + total_comm_time
                 task_finish = start_time + total_duration
                 
-                logging.debug(
-                    "Testing task %s on node %s: comm_time=%s, runtime=%s, start=%s, finish=%s",
-                    task_name,
-                    node,
-                    total_comm_time,
-                    runtime,
-                    task_start,
-                    task_finish
-                )
+                # logging.debug(
+                #     "Testing task %s on node %s: comm_time=%s, runtime=%s, start=%s, finish=%s",
+                #     task_name,
+                #     node,
+                #     total_comm_time,
+                #     runtime,
+                #     task_start,
+                #     task_finish
+                # )
                 
                 if task_finish < min_finish_time:
                     min_finish_time = task_finish
@@ -214,6 +243,5 @@ class HeftBusyCommScheduler(Scheduler):
         Returns:
             Dict[str, List[Task]]: The schedule.
         """
-        runtimes, commtimes = HeftBusyCommScheduler.get_runtimes(network, task_graph)
         schedule_order = heft_rank_sort(network, task_graph)
-        return self._schedule(network, task_graph, runtimes, commtimes, schedule_order)
+        return self._schedule(network, task_graph, schedule_order)
