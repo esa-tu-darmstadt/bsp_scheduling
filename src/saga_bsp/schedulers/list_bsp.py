@@ -17,8 +17,6 @@ from saga.schedulers.cpop import upward_rank
 
 logger = logging.getLogger(__name__)
 
-from profiling_decorator import profile
-
 
 @dataclass(order=True)
 class PrioritizedTask:
