@@ -16,7 +16,8 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
                    legend_loc: Optional[str] = 'upper right',
                    title: Optional[str] = None,
                    y_label: Optional[str] = 'Processors',
-                   axis: Optional[plt.Axes] = None) -> plt.Axes:
+                   axis: Optional[plt.Axes] = None,
+                   show_task_names = True) -> plt.Axes:
     """Draw BSP schedule with superstep boundaries and phases.
     
     Args:
@@ -30,6 +31,7 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
         title: Optional title for the plot
         y_label: Label for the y-axis (None for no label)
         axis: Existing axis to plot on
+        show_task_names: Whether to show task names on the bars
         
     Returns:
         The matplotlib axis with the plot
@@ -132,7 +134,7 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
                     axis.add_patch(rect)
                     
                     # Task label
-                    if task_duration > max_time * 0.02:  # Only show label if task is wide enough
+                    if show_task_names and task_duration > max_time * 0.02:  # Only show label if task is wide enough
                         axis.text(
                             task_start + task_duration / 2, y_pos,
                             task.node, ha='center', va='center',
@@ -144,8 +146,9 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
                 axis.axvline(x=superstep.end_time, color='red', linestyle='--', alpha=0.8, linewidth=2)
         
         # Formatting
-        axis.set_yticks(list(y_positions.values()))
-        axis.set_yticklabels(list(y_positions.keys()))
+        if len(all_processors) <= 20:
+            axis.set_yticks(list(y_positions.values()))
+            axis.set_yticklabels(list(y_positions.keys()))
         axis.set_xlabel('Time', fontsize=font_size)
         if y_label:
             axis.set_ylabel(y_label, fontsize=font_size)
@@ -552,8 +555,9 @@ def draw_busy_comm_gantt(schedule: Dict[Hashable, List],
                         )
         
         # Set axis properties
-        axis.set_yticks(range(len(processors)))
-        axis.set_yticklabels(processors)
+        if len(processors) < 10:
+            axis.set_yticks(range(len(processors)))
+            axis.set_yticklabels(processors)
         axis.set_ylim(-0.5, len(processors) - 0.5)
         
         # Set x-axis limits
