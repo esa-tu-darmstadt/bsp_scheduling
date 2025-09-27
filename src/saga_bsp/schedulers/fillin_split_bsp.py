@@ -52,7 +52,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
         """Initialize the Fill-in/Split BSP scheduler.
 
         Args:
-            verbose: Enable detailed logging
+            verbose: Enable detailed output to console
             draw_after_each_step: Enable drawing Gantt chart after each scheduling step
             priority_mode: Priority calculation mode - "heft" (upward rank only) or "cpop" (upward + downward rank)
         """
@@ -64,13 +64,15 @@ class FillInSplitBSPScheduler(BSPScheduler):
 
         if self.priority_mode not in ["heft", "cpop"]:
             raise ValueError(f"Invalid priority_mode: {priority_mode}. Must be 'heft' or 'cpop'")
-        
+
         # Initialize statistics
         self._reset_stats()
-        
-        if verbose:
-            logger.setLevel(logging.DEBUG)
-    
+
+    def _log(self, message: str):
+        """Print message if verbose mode is enabled."""
+        if self.verbose:
+            print(f"  {message}")
+
     def _reset_stats(self):
         """Reset scheduler statistics."""
         self.stats = {
@@ -113,7 +115,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
                 queue.put(PrioritizedTask(rank[task], task))
                 if self.verbose:
                     mode_str = "HEFT" if self.priority_mode == "heft" else "CPOP"
-                    logger.debug(f"Task {task} added to initial queue with {mode_str} rank {rank[task]}")
+                    self._log(f"Task {task} added to initial queue with {mode_str} rank {rank[task]}")
         
         # Create initial superstep if needed
         if not schedule.supersteps:
@@ -128,7 +130,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
             
             if self.verbose:
                 mode_str = "HEFT" if self.priority_mode == "heft" else "CPOP"
-                logger.debug(f"\n#{task_num}: Processing task {task_name} with {mode_str} rank {rank[task_name]}")
+                self._log(f"\n#{task_num}: Processing task {task_name} with {mode_str} rank {rank[task_name]}")
             
             # Try placement strategies in priority order
             placed = False
@@ -140,7 +142,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
                 self.stats['fill_in_placements'] += 1
                 placed = True
                 if self.verbose:
-                    logger.debug(f"  Placed using fill-in strategy on processor {processor}, "
+                    self._log(f"  Placed using fill-in strategy on processor {processor}, "
                                f"superstep {superstep.index}")
             
             # Phase 2: Try append strategy (if dependency-ready time is in last superstep)
@@ -151,7 +153,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
                     self.stats['append_placements'] += 1
                     placed = True
                     if self.verbose:
-                        logger.debug(f"  Placed using append strategy on processor {processor}, "
+                        self._log(f"  Placed using append strategy on processor {processor}, "
                                    f"superstep {superstep.index}")
             
             # Phase 3: Use split strategy (always works)
@@ -162,13 +164,13 @@ class FillInSplitBSPScheduler(BSPScheduler):
                 self.stats['split_placements'] += 1
                 placed = True
                 if self.verbose:
-                    logger.debug(f"  Placed using split strategy on processor {processor}, "
+                    self._log(f"  Placed using split strategy on processor {processor}, "
                                f"superstep {superstep.index}")
             
             # FIXME: 
             if superstep.index > 0 and schedule.merge_supersteps(superstep.index-1) > 0:
                 self.stats['supersteps_merged'] += 1
-                logger.debug(f"  Merged supersteps {superstep.index-1} and {superstep.index} after placement")
+                self._log(f"  Merged supersteps {superstep.index-1} and {superstep.index} after placement")
             self.stats['tasks_scheduled'] += 1
             
             # Add newly ready successors to queue
@@ -177,7 +179,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
                     queue.put(PrioritizedTask(rank[successor], successor))
                     if self.verbose:
                         mode_str = "HEFT" if self.priority_mode == "heft" else "CPOP"
-                        logger.debug(f"  Task {successor} became ready with {mode_str} rank {rank[successor]}")
+                        self._log(f"  Task {successor} became ready with {mode_str} rank {rank[successor]}")
             
             # Optionally draw Gantt chart after each step
             if self.draw_after_each_step:
@@ -188,7 +190,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
         merges = schedule.merge_supersteps()
         self.stats['supersteps_merged'] = merges
         if self.verbose and merges > 0:
-            logger.debug(f"\nMerged {merges} superstep(s) to reduce synchronization overhead")
+            self._log(f"\nMerged {merges} superstep(s) to reduce synchronization overhead")
         
         # Validate the final schedule
         schedule.assert_valid()
@@ -297,7 +299,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
                 superstep_end_time = superstep.end_time
                 
                 # Check if there's a hole (task fits without extending superstep)
-                if task_finish_time <= superstep_end_time + 0.00001:  # Small tolerance
+                if task_finish_time <= superstep_end_time * 1.0001:  # Small tolerance
                     if task_finish_time < best_finish_time:
                         best_finish_time = task_finish_time
                         best_processor = processor
@@ -305,7 +307,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
                         
                         if self.verbose:
                             hole_size = superstep_end_time - proc_end_time
-                            logger.debug(f"    Found fill-in opportunity: superstep {superstep.index}, "
+                            self._log(f"    Found fill-in opportunity: superstep {superstep.index}, "
                                        f"proc {processor}, hole_size={hole_size:.2f}")
         
         return best_processor, best_superstep
@@ -360,7 +362,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
                     best_processor = processor
                     
                     if self.verbose:
-                        logger.debug(f"    Found append opportunity: last superstep, "
+                        self._log(f"    Found append opportunity: last superstep, "
                                    f"proc {processor}, finish={task_finish_absolute:.2f}")
         
         if best_processor is not None:
@@ -394,7 +396,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
             raise ValueError(f"Could not find valid dependency-ready time for task {task_name}")
         
         if self.verbose:
-            logger.debug(f"    Dependency-ready time: {dep_ready_time:.2f}")
+            self._log(f"    Dependency-ready time: {dep_ready_time:.2f}")
         
         # Step 2: Create/split superstep at the dependency-ready time (only once!)
         original_count = len(schedule.supersteps)
@@ -405,11 +407,11 @@ class FillInSplitBSPScheduler(BSPScheduler):
             if superstep.index == len(schedule.supersteps) - 1:
                 self.stats['supersteps_created'] += 1
                 if self.verbose:
-                    logger.debug(f"    Created new superstep {superstep.index}")
+                    self._log(f"    Created new superstep {superstep.index}")
             else:
                 self.stats['supersteps_split'] += 1
                 if self.verbose:
-                    logger.debug(f"    Split to create superstep {superstep.index}")
+                    self._log(f"    Split to create superstep {superstep.index}")
         
         # Step 3: Evaluate each processor for best placement
         best_processor = None
@@ -432,10 +434,10 @@ class FillInSplitBSPScheduler(BSPScheduler):
                 best_processor = processor
                 
                 if self.verbose:
-                    logger.debug(f"    Processor {processor}: finish={task_finish_absolute:.2f}")
+                    self._log(f"    Processor {processor}: finish={task_finish_absolute:.2f}")
         
         if self.verbose:
-            logger.debug(f"    Selected processor {best_processor} with finish time {best_finish_time:.2f}")
+            self._log(f"    Selected processor {best_processor} with finish time {best_finish_time:.2f}")
         
         return best_processor, superstep
     
