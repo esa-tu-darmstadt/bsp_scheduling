@@ -12,19 +12,19 @@ from typing import Dict, List, Optional, Any
 import pandas as pd
 from joblib import Parallel, delayed
 
-from dataset_generator import DatasetGenerator, TaskGraphMetadata
+from dataset_generator import DatasetGenerator, DatasetItem, load_dataset, find_datasets, parse_dataset_for_experiments
 from schedule_visualizer import save_schedule_visualization, should_save_visualization
 
 logger = logging.getLogger(__name__)
 
 
-def run_single_scheduler_task(scheduler_name, scheduler, task_graph, bsp_hardware, metadata, task_graph_idx,
+def run_single_scheduler_task(scheduler_name, scheduler, dataset_item, task_graph_idx,
                              dataset_name=None, visualization_dir=None):
-    """Run a single scheduler on a single task graph."""
+    """Run a single scheduler on a single dataset item."""
     logger.debug(f"Running scheduler {scheduler_name} on task graph {task_graph_idx}")
     try:
         # All schedulers now use the unified interface
-        result = scheduler.schedule(bsp_hardware, task_graph)
+        result = scheduler.schedule(dataset_item.hardware, dataset_item.task_graph)
         makespan = result['makespan']
 
         # Save schedule visualization for first task graph of each dataset/scheduler
@@ -42,14 +42,15 @@ def run_single_scheduler_task(scheduler_name, scheduler, task_graph, bsp_hardwar
             'scheduler_name': scheduler_name,
             'makespan': makespan,
             'task_graph_idx': task_graph_idx,
-            'target_ccr': metadata.target_ccr,
-            'sync_time': metadata.sync_time
+            'target_ccr': dataset_item.metadata.get('target_ccr'),
+            'actual_ccr': dataset_item.metadata.get('actual_ccr'),
+            'sync_time': dataset_item.metadata.get('sync_time'),
+            'num_tiles': dataset_item.metadata.get('num_tiles')
         }
 
     except Exception as e:
         logger.warning(f"Scheduler {scheduler_name} failed on task graph {task_graph_idx}: {e}")
         raise e
-        return None
 
 
 
@@ -65,21 +66,18 @@ class BenchmarkRunner:
         """
         self.schedulers = schedulers
 
-    def run_dataset_benchmark(self, dataset_name: str, task_graphs: List, bsp_hardware_list: List,
-                             metadata_list: List[TaskGraphMetadata], resultsdir: pathlib.Path,
-                             num_jobs: int = 1, overwrite: bool = False, max_instances: int = 5,
-                             visualization_dir: Optional[pathlib.Path] = None) -> None:
+    def run_dataset_benchmark(self, dataset_name: str, dataset_items: List[DatasetItem],
+                             resultsdir: pathlib.Path, num_jobs: int = 1, overwrite: bool = False,
+                             max_instances: int = 5, visualization_dir: Optional[pathlib.Path] = None) -> None:
         """Run benchmark on a specific dataset.
 
         Args:
             dataset_name: Name of the dataset
-            task_graphs: List of task graphs
-            bsp_hardware_list: List of BSP hardware configurations
-            metadata_list: List of metadata for each task graph
+            dataset_items: List of dataset items (task graph + hardware + metadata)
             resultsdir: Directory to store results
             num_jobs: Number of parallel jobs
             overwrite: Whether to overwrite existing results
-            max_instances: Maximum number of task graphs to use for benchmarking
+            max_instances: Maximum number of dataset items to use for benchmarking
             visualization_dir: Directory to save schedule visualizations (optional)
         """
         savepath = resultsdir / f"{dataset_name}.csv"
@@ -87,28 +85,26 @@ class BenchmarkRunner:
             logger.info(f"Results for {dataset_name} already exist. Skipping.")
             return
 
-        # Limit number of task graphs for benchmarking
-        if max_instances > 0 and len(task_graphs) > max_instances:
-            task_graphs = task_graphs[:max_instances]
-            bsp_hardware_list = bsp_hardware_list[:max_instances]
-            metadata_list = metadata_list[:max_instances]
+        # Limit number of dataset items for benchmarking
+        if max_instances > 0 and len(dataset_items) > max_instances:
+            dataset_items = dataset_items[:max_instances]
             logger.info(f"Limited to {max_instances} instances for {dataset_name}")
 
-        logger.info(f"Running benchmark on {dataset_name} with {len(task_graphs)} task graphs")
+        logger.info(f"Running benchmark on {dataset_name} with {len(dataset_items)} dataset items")
 
-        # Create all scheduler-task_graph combinations for parallel execution
+        # Create all scheduler-dataset_item combinations for parallel execution
         tasks = []
-        for i, (task_graph, bsp_hardware, metadata) in enumerate(zip(task_graphs, bsp_hardware_list, metadata_list)):
+        for i, dataset_item in enumerate(dataset_items):
             for scheduler_name, scheduler in self.schedulers.items():
-                tasks.append((scheduler_name, scheduler, task_graph, bsp_hardware, metadata, i, dataset_name, visualization_dir))
+                tasks.append((scheduler_name, scheduler, dataset_item, i, dataset_name, visualization_dir))
 
         logger.info(f"Running {len(tasks)} scheduler-task combinations in parallel with {num_jobs} jobs")
 
         # Execute all combinations in parallel
         parallel_results = Parallel(n_jobs=num_jobs, verbose=1)(
             delayed(run_single_scheduler_task)(
-                scheduler_name, scheduler, task_graph, bsp_hardware, metadata, task_graph_idx, dataset_name, visualization_dir
-            ) for scheduler_name, scheduler, task_graph, bsp_hardware, metadata, task_graph_idx, dataset_name, visualization_dir in tasks
+                scheduler_name, scheduler, dataset_item, task_graph_idx, dataset_name, visualization_dir
+            ) for scheduler_name, scheduler, dataset_item, task_graph_idx, dataset_name, visualization_dir in tasks
         )
 
         # Filter out None results (failed executions)
@@ -116,7 +112,7 @@ class BenchmarkRunner:
 
         # Group results by task graph and calculate ratios
         results = []
-        for task_graph_idx in range(len(task_graphs)):
+        for task_graph_idx in range(len(dataset_items)):
             # Get results for this task graph
             task_results = [r for r in valid_results if r['task_graph_idx'] == task_graph_idx]
 
@@ -134,8 +130,10 @@ class BenchmarkRunner:
                     'makespan': result['makespan'],
                     'makespan_ratio': ratio,
                     'task_graph_idx': result['task_graph_idx'],
-                    'target_ccr': result['target_ccr'],
-                    'sync_time': result['sync_time']
+                    'target_ccr': result.get('target_ccr'),
+                    'actual_ccr': result.get('actual_ccr'),
+                    'sync_time': result.get('sync_time'),
+                    'num_tiles': result.get('num_tiles')
                 })
 
         # Convert results to DataFrame
@@ -162,37 +160,53 @@ class BenchmarkRunner:
             max_instances: Maximum number of instances per dataset (0 = no limit)
             visualization_dir: Directory to save schedule visualizations (optional)
         """
-        generator = DatasetGenerator(cache_dir=datadir)
+        # Find all available dataset files
+        dataset_files = find_datasets(datadir)
 
-        # Get available datasets
-        available_recipes = list(generator.RECIPES.keys())
+        if not dataset_files:
+            logger.warning("No dataset files found in {datadir}")
+            return
+
+        # Extract dataset names from file names
+        available_datasets = []
+        for dataset_file in dataset_files:
+            # Remove "_dataset.pkl" suffix to get dataset name
+            dataset_key = dataset_file.stem.replace("_dataset", "")
+            available_datasets.append((dataset_key, dataset_file))
+
+        # Filter datasets if specific names requested
         if dataset_names:
-            recipes_to_run = [name for name in dataset_names if name in available_recipes]
-            if len(recipes_to_run) != len(dataset_names):
-                missing = set(dataset_names) - set(recipes_to_run)
-                logger.warning(f"Some requested datasets not found: {missing}")
-        else:
-            recipes_to_run = available_recipes
+            filtered_datasets = []
+            for requested_name in dataset_names:
+                found = False
+                for dataset_key, dataset_file in available_datasets:
+                    if requested_name in dataset_key:
+                        filtered_datasets.append((dataset_key, dataset_file))
+                        found = True
+                        break
+                if not found:
+                    logger.warning(f"Dataset {requested_name} not found")
+            available_datasets = filtered_datasets
 
-        logger.info(f"Running benchmarks on {len(recipes_to_run)} datasets: {recipes_to_run}")
+        logger.info(f"Running benchmarks on {len(available_datasets)} datasets: {[name for name, _ in available_datasets]}")
 
         # Run benchmarks for each dataset
-        for recipe_name in recipes_to_run:
+        for dataset_key, dataset_file in available_datasets:
             try:
-                # Load cached dataset
-                cached_data = generator.load_cached_dataset(recipe_name)
-                if cached_data is None:
-                    logger.warning(f"No cached data for {recipe_name}, skipping")
+                # Load dataset
+                dataset_items, dataset_metadata = load_dataset(dataset_file)
+
+                if not dataset_items:
+                    logger.warning(f"No items in dataset {dataset_key}, skipping")
                     continue
 
-                task_graphs, bsp_hardware_list, metadata_list = cached_data
+                # Use display name from metadata if available, fallback to dataset_key
+                display_name = getattr(dataset_metadata, 'dataset_name', dataset_key)
 
                 # Run benchmark
                 self.run_dataset_benchmark(
-                    dataset_name=recipe_name,
-                    task_graphs=task_graphs,
-                    bsp_hardware_list=bsp_hardware_list,
-                    metadata_list=metadata_list,
+                    dataset_name=display_name,
+                    dataset_items=dataset_items,
                     resultsdir=resultsdir,
                     num_jobs=num_jobs,
                     overwrite=overwrite,
@@ -201,7 +215,7 @@ class BenchmarkRunner:
                 )
 
             except Exception as e:
-                logger.error(f"Failed to run benchmark on {recipe_name}: {e}")
+                logger.error(f"Failed to run benchmark on {dataset_key}: {e}")
 
     def load_results(self, resultsdir: pathlib.Path, glob: str = "*.csv") -> pd.DataFrame:
         """Load benchmark results from CSV files.
