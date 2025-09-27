@@ -4,6 +4,6 @@ Hardware-specific BSP configurations.
 This module provides specialized BSP hardware configurations for different architectures.
 """
 
-from .graphcore import GraphcoreIPUHardware, create_ipu_hardware
+from .graphcore import IPUHardware, create_ipu_from_columns, create_ipu_from_islands, create_ipu_from_tiles, create_ipu_from_ipus
 
-__all__ = ['GraphcoreIPUHardware', 'create_ipu_hardware']
+__all__ = ['IPUHardware', 'create_ipu_from_columns', 'create_ipu_from_islands', 'create_ipu_from_tiles', 'create_ipu_from_ipus']
