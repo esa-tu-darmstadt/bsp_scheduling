@@ -20,8 +20,9 @@ import argparse
 import shutil
 from typing import List, Optional
 
-from dataset_generator import DatasetGenerator
-from hardware_ipu import IPUHardware
+from dataset_generator import (
+    generate_wfcommons_datasets, generate_spn_datasets, generate_primitives_datasets
+)
 from schedulers import get_bsp_schedulers
 from benchmark_runner import BenchmarkRunner
 from visualizations import BoxPlotVisualizer, HeatmapVisualizer
@@ -66,6 +67,12 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
     
+    if args.clean_datasets:
+        args.clean_results = True
+        
+    if args.clean_results:
+        args.clean_visualizations = True
+    
     if args.verbose:
         logger.setLevel(logging.DEBUG)
         logging.getLogger('dataset_generator').setLevel(logging.DEBUG)
@@ -92,14 +99,37 @@ def main():
         shutil.rmtree(args.visdir)
 
     # Initialize components
-    dataset_generator = DatasetGenerator(cache_dir=args.datadir)
     schedulers = get_bsp_schedulers(scheduler_names=args.schedulers)
     runner = BenchmarkRunner(schedulers=schedulers)
 
     # Step 1: Generate datasets
     if not args.skip_generation:
         logger.info("Generating datasets...")
-        dataset_generator.generate_all_datasets(overwrite=args.overwrite)
+
+        # Generate WfCommons datasets
+        logger.info("Generating WfCommons datasets...")
+        wfcommons_datasets = generate_wfcommons_datasets(
+            cache_dir=args.datadir,
+            task_count=50,  # Fixed task count for consistency
+            overwrite_cache=args.overwrite
+        )
+        logger.info(f"Generated {len(wfcommons_datasets)} WfCommons datasets")
+
+        # Generate SPN datasets
+        logger.info("Generating SPN datasets...")
+        spn_datasets = generate_spn_datasets(
+            cache_dir=args.datadir,
+            overwrite_cache=args.overwrite
+        )
+        logger.info(f"Generated {len(spn_datasets)} SPN datasets")
+
+        # Generate primitives datasets
+        logger.info("Generating primitives datasets...")
+        primitives_datasets = generate_primitives_datasets(
+            cache_dir=args.datadir,
+            overwrite_cache=args.overwrite
+        )
+        logger.info(f"Generated {len(primitives_datasets)} primitives datasets")
 
     # Step 2: Run benchmarks
     if not args.skip_benchmarking:
