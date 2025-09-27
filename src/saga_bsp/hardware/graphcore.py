@@ -1,219 +1,198 @@
 """
-Graphcore IPU hardware specialization for BSP scheduling.
+IPU Hardware implementation for BSP scheduling.
 
-This module provides hardware configurations for Graphcore Intelligence Processing Units (IPUs),
-including single IPU configurations and multi-IPU M2000 systems with torus topology.
+This module implements the IPU topology as specified:
+- 4 tiles per island, connected at 128 bit/cycle
+- 16 islands per column, connected at 64 bit/cycle
+- 23 columns per IPU, inter-column tiles connected at 32 bit/cycle
+- Multiple IPUs connected at 8 bit/cycle
+
+ALL tiles are connected to ALL other tiles, with speeds determined by their hierarchical relationship.
 """
 
-from typing import List
 import networkx as nx
 import math
-from ..schedule import BSPHardware
+from typing import Union, Optional
+import logging
 
+from .. import BSPHardware
 
-class GraphcoreIPUHardware(BSPHardware):
-    """Specialized BSP hardware configuration for Graphcore IPUs.
-    
-    Architecture:
-    - Each IPU contains 1472 tiles (processors)
-    - All tiles within an IPU are fully connected
-    - Communication bus: 4 bytes width
-    - Default IPU system clock: 1.8 GHz
-    - Multiple IPUs connected via IPU-Links in M2000 devices (4 IPUs per M2000)
-    - M2000 systems connected in torus topology
-    """
-    
-    TILES_PER_IPU = 1472
-    IPUS_PER_M2000 = 4
-    COMMUNICATION_BUS_WIDTH = 4  # bytes
-    DEFAULT_IPU_CLOCK_GHZ = 1.8
-    
-    def __init__(self, 
-                 num_tiles: int,
-                 ipu_clock_ghz: float = DEFAULT_IPU_CLOCK_GHZ,
-                 sync_time_ns: float = 100.0):
-        """Initialize Graphcore IPU hardware configuration.
-        
+logger = logging.getLogger(__name__)
+
+class IPUHardware(BSPHardware):
+    """IPU-specific BSP hardware implementation."""
+
+    # IPU topology constants
+    TILES_PER_ISLAND = 4
+    ISLANDS_PER_COLUMN = 23
+    COLUMNS_PER_IPU = 16
+
+    TILES_PER_COLUMN = TILES_PER_ISLAND * ISLANDS_PER_COLUMN  # 92
+    TILES_PER_IPU = TILES_PER_COLUMN * COLUMNS_PER_IPU        # 1472
+
+    CLOCK_SPEED_HZ = 1.8e9  # 1.8 GHz
+
+    # Connection speeds (bit/cycle)
+    INTRA_ISLAND_SPEED = 128*CLOCK_SPEED_HZ    # tiles within same island
+    INTRA_COLUMN_SPEED = 64*CLOCK_SPEED_HZ     # islands within same column
+    INTRA_IPU_SPEED = 32*CLOCK_SPEED_HZ        # columns within same IPU
+    INTER_IPU_SPEED = 8*CLOCK_SPEED_HZ         # between IPUs
+
+    def __init__(self,
+                 num_tiles: Optional[int] = None,
+                 num_islands: Optional[int] = None,
+                 num_columns: Optional[int] = None,
+                 num_ipus: Optional[int] = None,
+                 sync_time: float = 100.0):
+        """Initialize IPU hardware configuration.
+
+        User can specify either num_tiles, num_islands, num_columns, or num_ipus.
+        Only one parameter should be provided.
+
         Args:
-            num_tiles: Total number of tiles to configure
-            ipu_clock_ghz: IPU system clock frequency in GHz (default: 1.8)
-            sync_time_ns: Synchronization time in nanoseconds (default: 100.0)
+            num_tiles: Total number of tiles
+            num_islands: Number of islands (each has 4 tiles)
+            num_columns: Number of columns (each has 64 tiles)
+            num_ipus: Number of IPUs (each has 1472 tiles)
+            sync_time: Synchronization time in nanoseconds
         """
-        self.num_tiles = num_tiles
-        self.ipu_clock_ghz = ipu_clock_ghz
-        self.sync_time_ns = sync_time_ns
-        
-        # Calculate number of IPUs and M2000 systems needed
-        self.num_ipus = math.ceil(num_tiles / self.TILES_PER_IPU)
-        self.num_m2000s = math.ceil(self.num_ipus / self.IPUS_PER_M2000)
-        
-        # Generate network topology and calculate sync time
+        # Validate input - exactly one parameter should be provided
+        params = [num_tiles, num_islands, num_columns, num_ipus]
+        non_none_params = [p for p in params if p is not None]
+
+        if len(non_none_params) != 1:
+            raise ValueError("Exactly one of num_tiles, num_islands, num_columns, or num_ipus must be specified")
+
+        # Calculate total tiles based on input
+        if num_tiles is not None:
+            self.num_tiles = num_tiles
+        elif num_islands is not None:
+            self.num_tiles = num_islands * self.TILES_PER_ISLAND
+        elif num_columns is not None:
+            self.num_tiles = num_columns * self.TILES_PER_COLUMN
+        elif num_ipus is not None:
+            self.num_tiles = num_ipus * self.TILES_PER_IPU
+
+        # Calculate hierarchy counts
+        self.num_ipus = math.ceil(self.num_tiles / self.TILES_PER_IPU)
+        self.num_columns = math.ceil(self.num_tiles / self.TILES_PER_COLUMN)
+        self.num_islands = math.ceil(self.num_tiles / self.TILES_PER_ISLAND)
+
+        logger.info(f"IPU Hardware: {self.num_tiles} tiles, {self.num_islands} islands, "
+                   f"{self.num_columns} columns, {self.num_ipus} IPUs")
+
+        # Generate network topology
         network = self._generate_network_topology()
-        sync_time_seconds = sync_time_ns / 1e9  # Convert ns to seconds
-        
+
+        # Convert sync time from nanoseconds to seconds
+        sync_time_seconds = sync_time / 1e9
+
         super().__init__(network=network, sync_time=sync_time_seconds)
-    
+
     def _generate_network_topology(self) -> nx.Graph:
-        """Generate the network topology for the IPU configuration."""
+        """Generate the network topology for the IPU configuration.
+
+        Creates a fully connected graph where ALL tiles are connected to ALL other tiles,
+        with connection speeds determined by their hierarchical relationship.
+        """
         network = nx.Graph()
-        
-        # Add all tiles as nodes
+
+        # Add all tiles as nodes with uniform processing speed
         for tile_id in range(self.num_tiles):
-            # Calculate which IPU and M2000 this tile belongs to
-            ipu_id = tile_id // self.TILES_PER_IPU
-            m2000_id = ipu_id // self.IPUS_PER_M2000
-            
-            # Tile compute capability (all tiles equal for simplicity)
-            tile_speed = self.ipu_clock_ghz  # Operations per second (simplified)
-            
-            network.add_node(
-                f"tile_{tile_id}",
-                weight=tile_speed,
-                ipu_id=ipu_id,
-                m2000_id=m2000_id
-            )
-        
-        # Add edges based on topology
-        self._add_intra_ipu_connections(network)
-        self._add_inter_ipu_connections(network)
-        self._add_inter_m2000_connections(network)
-        
+            network.add_node(f"tile_{tile_id}", weight=self.CLOCK_SPEED_HZ)
+
+        # Connect ALL tiles to ALL other tiles (including self-loops for SAGA compatibility)
+        for tile1_id in range(self.num_tiles):
+            for tile2_id in range(self.num_tiles):
+                tile1_name = f"tile_{tile1_id}"
+                tile2_name = f"tile_{tile2_id}"
+
+                if tile1_id == tile2_id:
+                    # Self-loops have zero communication cost (same node)
+                    network.add_edge(tile1_name, tile2_name, weight=self.CLOCK_SPEED_HZ*1e6)
+                else:
+                    # Determine connection speed based on hierarchical relationship
+                    speed = self._get_connection_speed(tile1_id, tile2_id)
+                    # Only add edge if it doesn't exist (since we want undirected graph)
+                    if not network.has_edge(tile1_name, tile2_name):
+                        network.add_edge(tile1_name, tile2_name, weight=speed)
+
+        logger.info(f"Generated fully connected network with {network.number_of_nodes()} nodes and {network.number_of_edges()} edges")
         return network
-    
-    def _add_intra_ipu_connections(self, network: nx.Graph):
-        """Add full connectivity within each IPU."""
-        for ipu_id in range(self.num_ipus):
-            # Get all tiles in this IPU
-            ipu_tiles = [
-                f"tile_{tile_id}" 
-                for tile_id in range(self.num_tiles)
-                if tile_id // self.TILES_PER_IPU == ipu_id
-            ]
-            
-            # Full connectivity within IPU (very high bandwidth)
-            intra_ipu_bandwidth = self.COMMUNICATION_BUS_WIDTH * self.ipu_clock_ghz * 1e9  # bytes/second
-            
-            for i, tile1 in enumerate(ipu_tiles):
-                for tile2 in ipu_tiles[i+1:]:
-                    network.add_edge(tile1, tile2, weight=intra_ipu_bandwidth)
-    
-    def _add_inter_ipu_connections(self, network: nx.Graph):
-        """Add IPU-Link connections between IPUs within M2000 systems."""
-        if self.num_ipus <= 1:
-            return
-            
-        # IPU-Link bandwidth (lower than intra-IPU)
-        ipu_link_bandwidth = 64e9  # 64 GB/s per IPU-Link (typical value)
-        
-        for m2000_id in range(self.num_m2000s):
-            # Get IPUs in this M2000
-            m2000_ipus = []
-            for ipu_id in range(self.num_ipus):
-                if ipu_id // self.IPUS_PER_M2000 == m2000_id:
-                    m2000_ipus.append(ipu_id)
-            
-            # Connect IPUs within M2000 according to the topology shown in images
-            # Based on the image, it appears IPUs are connected in a specific pattern
-            # For simplicity, we'll use a ring topology with cross-connections
-            if len(m2000_ipus) > 1:
-                self._connect_ipus_in_m2000(network, m2000_ipus, ipu_link_bandwidth)
-    
-    def _connect_ipus_in_m2000(self, network: nx.Graph, ipu_ids: List[int], bandwidth: float):
-        """Connect IPUs within an M2000 system based on the hardware topology."""
-        # Create representative nodes for each IPU (use first tile of each IPU)
-        ipu_representatives = []
-        for ipu_id in ipu_ids:
-            first_tile_id = ipu_id * self.TILES_PER_IPU
-            if first_tile_id < self.num_tiles:
-                ipu_representatives.append(f"tile_{first_tile_id}")
-        
-        # Based on the M2000 topology from images, create ring + cross connections
-        for i, ipu_rep1 in enumerate(ipu_representatives):
-            for ipu_rep2 in ipu_representatives[i+1:]:
-                # Connect representative tiles between IPUs
-                network.add_edge(ipu_rep1, ipu_rep2, weight=bandwidth)
-                
-                # Also connect a few more tiles between IPUs for better connectivity
-                ipu1_id = int(ipu_rep1.split('_')[1]) // self.TILES_PER_IPU
-                ipu2_id = int(ipu_rep2.split('_')[1]) // self.TILES_PER_IPU
-                
-                # Add a few more inter-IPU connections
-                for k in range(min(4, self.TILES_PER_IPU // 100)):  # Sparse connections
-                    tile1_id = ipu1_id * self.TILES_PER_IPU + k * 100
-                    tile2_id = ipu2_id * self.TILES_PER_IPU + k * 100
-                    
-                    if tile1_id < self.num_tiles and tile2_id < self.num_tiles:
-                        network.add_edge(f"tile_{tile1_id}", f"tile_{tile2_id}", weight=bandwidth)
-    
-    def _add_inter_m2000_connections(self, network: nx.Graph):
-        """Add connections between M2000 systems in torus topology."""
-        if self.num_m2000s <= 1:
-            return
-            
-        # Inter-M2000 bandwidth (typically lower than IPU-Links)
-        inter_m2000_bandwidth = 32e9  # 32 GB/s (example value)
-        
-        # Create torus topology between M2000 systems
-        # For simplicity, we'll connect representative tiles from each M2000
-        m2000_representatives = []
-        for m2000_id in range(self.num_m2000s):
-            # Use the first tile of the first IPU in each M2000 as representative
-            first_ipu_in_m2000 = m2000_id * self.IPUS_PER_M2000
-            if first_ipu_in_m2000 < self.num_ipus:
-                first_tile_id = first_ipu_in_m2000 * self.TILES_PER_IPU
-                if first_tile_id < self.num_tiles:
-                    m2000_representatives.append(f"tile_{first_tile_id}")
-        
-        # Torus topology: each M2000 connects to its neighbors
-        for i, rep1 in enumerate(m2000_representatives):
-            # Connect to next M2000 (with wraparound for torus)
-            next_idx = (i + 1) % len(m2000_representatives)
-            rep2 = m2000_representatives[next_idx]
-            
-            if rep1 != rep2:  # Avoid self-loops
-                network.add_edge(rep1, rep2, weight=inter_m2000_bandwidth)
-    
+
+    def _get_tile_location(self, tile_id: int) -> dict:
+        """Get hierarchical location of a tile."""
+        island_id = tile_id // self.TILES_PER_ISLAND
+        column_id = tile_id // self.TILES_PER_COLUMN
+        ipu_id = tile_id // self.TILES_PER_IPU
+
+        return {
+            'tile_id': tile_id,
+            'island_id': island_id,
+            'column_id': column_id,
+            'ipu_id': ipu_id,
+            'tile_in_island': tile_id % self.TILES_PER_ISLAND,
+            'island_in_column': island_id % self.ISLANDS_PER_COLUMN,
+            'column_in_ipu': column_id % self.COLUMNS_PER_IPU
+        }
+
+    def _get_connection_speed(self, tile1_id: int, tile2_id: int) -> float:
+        """Get connection speed between two tiles based on their hierarchical relationship."""
+        if tile1_id == tile2_id:
+            return float('inf')  # Same tile
+
+        loc1 = self._get_tile_location(tile1_id)
+        loc2 = self._get_tile_location(tile2_id)
+
+        # Same island - highest speed (128 bit/cycle)
+        if loc1['island_id'] == loc2['island_id']:
+            return self.INTRA_ISLAND_SPEED
+
+        # Same column - medium-high speed (64 bit/cycle)
+        elif loc1['column_id'] == loc2['column_id']:
+            return self.INTRA_COLUMN_SPEED
+
+        # Same IPU - medium speed (32 bit/cycle)
+        elif loc1['ipu_id'] == loc2['ipu_id']:
+            return self.INTRA_IPU_SPEED
+
+        # Different IPUs - lowest speed (8 bit/cycle)
+        else:
+            return self.INTER_IPU_SPEED
+
+    def get_connection_speed(self, tile1_id: int, tile2_id: int) -> float:
+        """Public method to get connection speed between two tiles."""
+        return self._get_connection_speed(tile1_id, tile2_id)
+
     def get_tile_info(self, tile_name: str) -> dict:
-        """Get information about a specific tile."""
+        """Get hierarchical information about a tile."""
         if not tile_name.startswith("tile_"):
             raise ValueError(f"Invalid tile name: {tile_name}")
-        
+
         tile_id = int(tile_name.split('_')[1])
-        ipu_id = tile_id // self.TILES_PER_IPU
-        m2000_id = ipu_id // self.IPUS_PER_M2000
-        
-        return {
-            "tile_id": tile_id,
-            "ipu_id": ipu_id,
-            "m2000_id": m2000_id,
-            "tile_in_ipu": tile_id % self.TILES_PER_IPU,
-            "ipu_in_m2000": ipu_id % self.IPUS_PER_M2000
-        }
-    
+        return self._get_tile_location(tile_id)
+
     def __str__(self) -> str:
-        return (f"GraphcoreIPUHardware(tiles={self.num_tiles}, "
-                f"ipus={self.num_ipus}, m2000s={self.num_m2000s}, "
-                f"clock={self.ipu_clock_ghz}GHz)")
-    
+        return (f"IPUHardware(tiles={self.num_tiles}, islands={self.num_islands}, "
+                f"columns={self.num_columns}, ipus={self.num_ipus})")
+
     def __repr__(self) -> str:
         return self.__str__()
 
 
-def create_ipu_hardware(num_tiles: int, 
-                       ipu_clock_ghz: float = GraphcoreIPUHardware.DEFAULT_IPU_CLOCK_GHZ,
-                       sync_time_ns: float = 100.0) -> GraphcoreIPUHardware:
-    """Convenience function to create Graphcore IPU hardware configuration.
-    
-    Args:
-        num_tiles: Number of tiles to configure
-        ipu_clock_ghz: IPU clock frequency in GHz
-        sync_time_ns: Synchronization time in nanoseconds
-        
-    Returns:
-        GraphcoreIPUHardware: Configured IPU hardware
-    """
-    return GraphcoreIPUHardware(
-        num_tiles=num_tiles,
-        ipu_clock_ghz=ipu_clock_ghz,
-        sync_time_ns=sync_time_ns
-    )
+# Convenience functions for creating hardware configurations
+def create_ipu_from_tiles(num_tiles: int, sync_time: float = 100.0) -> IPUHardware:
+    """Create IPU hardware from tile count."""
+    return IPUHardware(num_tiles=num_tiles, sync_time=sync_time)
+
+def create_ipu_from_islands(num_islands: int, sync_time: float = 100.0) -> IPUHardware:
+    """Create IPU hardware from island count."""
+    return IPUHardware(num_islands=num_islands, sync_time=sync_time)
+
+def create_ipu_from_columns(num_columns: int, sync_time: float = 100.0) -> IPUHardware:
+    """Create IPU hardware from column count."""
+    return IPUHardware(num_columns=num_columns, sync_time=sync_time)
+
+def create_ipu_from_ipus(num_ipus: int, sync_time: float = 100.0) -> IPUHardware:
+    """Create IPU hardware from IPU count."""
+    return IPUHardware(num_ipus=num_ipus, sync_time=sync_time)
