@@ -1,398 +1,635 @@
 """
-Dataset generation using WfCommons with caching and metadata.
+Dataset generation using WfCommons and SPNs with caching and metadata.
 
-This module generates task graphs using different WfCommons recipes,
-with caching support and metadata extraction for CCR adaptation.
+This module generates task graphs using different sources:
+- WfCommons workflow recipes (with optional CCR adjustment)
+- Sum-Product Networks (SPNs) (with natural bit/cycle weights)
+
+Datasets are stored as single pickle files containing both task graph and hardware.
 """
 
-import json
 import logging
 import pathlib
 import pickle
 import random
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 
 import networkx as nx
 import numpy as np
-from wfcommons.wfchef.recipes import (
-    BlastRecipe, BwaRecipe, CyclesRecipe, EpigenomicsRecipe,
-    GenomeRecipe, MontageRecipe, SeismologyRecipe, SoykbRecipe,
-    SrasearchRecipe
-)
-from wfcommons import WorkflowGenerator
-from saga.schedulers.data.random import gen_random_networks
 from saga_bsp.schedule import BSPHardware
+from saga_bsp.hardware import IPUHardware
+from saga_bsp.task_graphs import (
+    WfCommonsTaskGraphGenerator, SPNTaskGraphGenerator,
+    calculate_ccr, adjust_task_graph_to_ccr
+)
+from saga.schedulers.data.random import gen_in_trees, gen_out_trees, gen_parallel_chains
 
-from hardware_ipu import IPUHardware
 
 logger = logging.getLogger(__name__)
 
 @dataclass
-class TaskGraphMetadata:
-    """Metadata for cached task graphs."""
-    recipe_name: str
-    num_tasks: int
-    avg_task_weight: float
-    avg_edge_weight: float
-    task_count: int
-    edge_count: int
-    target_ccr: float
-    sync_time: float
+class DatasetItem:
+    """Single dataset item containing task graph, hardware, and metadata."""
+    task_graph: nx.DiGraph
+    hardware: BSPHardware
+    metadata: Dict[str, Any]
 
-class DatasetGenerator:
-    """Generator for WfCommons-based datasets with caching."""
+@dataclass
+class DatasetMetadata:
+    """Metadata for an entire dataset."""
+    source_type: str  # 'wfcommons' or 'spn'
+    source_name: str  # recipe name or SPN filename
+    dataset_name: str  # display name for visualizations
+    num_variations: int
+    tile_counts: List[int]
+    generated_timestamp: str
+    additional_info: Optional[Dict[str, Any]] = None
 
-    # Available WfCommons recipes
-    RECIPES = {
-        'blast': BlastRecipe,
-        'bwa': BwaRecipe,
-        'cycles': CyclesRecipe,
-        'epigenomics': EpigenomicsRecipe,
-        'genome': GenomeRecipe,
-        'montage': MontageRecipe,
-        'seismology': SeismologyRecipe,
-        'soykb': SoykbRecipe,
-        'srasearch': SrasearchRecipe,
-    }
+def generate_wfcommons_dataset(cache_dir: pathlib.Path, recipe_name: str,
+                               task_count: Optional[int] = None,
+                               tile_counts: List[int] = [4, 16, 32, 92],
+                               variations_per_tile: int = 3,
+                               overwrite_cache: bool = False) -> Tuple[List[DatasetItem], str]:
+    """Generate datasets for WfCommons workflows.
 
-    # Task count distributions for each recipe (min, max)
-    # These ranges are set above the base graph sizes for each recipe
-    TASK_COUNT_RANGES = {
-        'blast': (200, 500),        # Base graph ~183
-        'bwa': (150, 400),          # Base graph ~106
-        'cycles': (100, 500),       # Base graph ~69
-        'epigenomics': (100, 400),  # Base graph varies
-        'genome': (100, 400),       # Base graph varies
-        'montage': (100, 400),      # Base graph varies
-        'seismology': (100, 400),   # Base graph varies
-        'soykb': (100, 400),        # Base graph varies
-        'srasearch': (100, 400),    # Base graph varies
-    }
+    Args:
+        cache_dir: Directory to store cached datasets
+        recipe_name: WfCommons recipe name
+        task_count: Number of tasks (optional)
+        tile_counts: List of tile counts to generate for
+        variations_per_tile: Number of variations per tile count
+        overwrite_cache: Whether to overwrite existing cache
 
-    def get_sync_time(self, avg_task_weight: float, avg_compute_speed: float) -> float:
-        base_sync_ratio = avg_task_weight / avg_compute_speed
-        sync_time_multiplier = np.random.uniform(0.01, 0.05)
-        return base_sync_ratio * sync_time_multiplier
-    
-    def get_num_tiles(self):
-        return int(np.random.uniform(16, 512))
+    Returns:
+        Tuple of (dataset_items, dataset_display_name)
+    """
+    wf_generator = WfCommonsTaskGraphGenerator(cache_dir=cache_dir)
+    dataset_display_name = recipe_name  # Use recipe name as display name
 
-    def __init__(self, cache_dir: pathlib.Path, num_variations: int = 50):
-        """Initialize the dataset generator.
+    # Create cache key
+    cache_key = f"wfcommons_{recipe_name.replace('.', '_').replace('/', '_')}"
+    if task_count:
+        cache_key += f"_tasks_{task_count}"
 
-        Args:
-            cache_dir: Directory to store cached datasets
-            num_variations: Number of variations per recipe
-        """
-        self.cache_dir = cache_dir
-        self.num_variations = num_variations
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{cache_key}_dataset.pkl"
 
-    def generate_task_graph(self, recipe_name: str, task_count: int) -> Tuple[nx.DiGraph, BSPHardware, TaskGraphMetadata]:
-        """Generate a single task graph using specified recipe.
-
-        Args:
-            recipe_name: Name of the WfCommons recipe
-            task_count: Number of tasks in the workflow
-
-        Returns:
-            Tuple of (scaled_task_graph, bsp_hardware, metadata)
-        """
-        if recipe_name not in self.RECIPES:
-            raise ValueError(f"Unknown recipe: {recipe_name}")
-
-        recipe_class = self.RECIPES[recipe_name]
-        recipe = recipe_class.from_num_tasks(task_count)
-        generator = WorkflowGenerator(recipe)
-
-        # Generate workflow using WfCommons
-        workflow = generator.build_workflow()
-
-        # The workflow object IS a NetworkX DiGraph
-        # Just copy it and ensure proper node/edge weights
-        task_graph = workflow.copy()
-
-        # Set node weights (task execution times)
-        for node in task_graph.nodes():
-            node_data = task_graph.nodes[node]
-            # WfCommons stores the Task object in node data
-            task_obj = node_data.get('task')
-            if task_obj and hasattr(task_obj, 'runtime'):
-                runtime = task_obj.runtime
-                if runtime is None or runtime <= 0:
-                    runtime = 1.0
-            else:
-                runtime = 1.0
-            task_graph.nodes[node]['weight'] = runtime
-
-        # Set edge weights (communication/data transfer sizes)
-        # For WfCommons, edges represent data dependencies
-        # We'll use the sum of input file sizes for the destination task
-        for src, dst in task_graph.edges():
-            dst_task_data = task_graph.nodes[dst]
-            dst_task_obj = dst_task_data.get('task')
-
-            # Calculate total input data size for this task
-            total_size = 0
-            if dst_task_obj and hasattr(dst_task_obj, 'input_files'):
-                for input_file in dst_task_obj.input_files:
-                    file_size = getattr(input_file, 'size', 0)
-                    if file_size and file_size > 0:
-                        total_size += file_size
-
-            # Use average per-edge size (divide by number of incoming edges)
-            incoming_edges = list(task_graph.predecessors(dst))
-            if len(incoming_edges) > 0:
-                avg_size = total_size / len(incoming_edges)
-            else:
-                avg_size = total_size
-
-            # Ensure minimum weight
-            if avg_size <= 0:
-                avg_size = 1.0
-
-            task_graph.edges[src, dst]['weight'] = avg_size
-
-        # Calculate original task and edge weights
-        task_weights = [task_graph.nodes[node].get('weight', 1.0) for node in task_graph.nodes()]
-        original_edge_weights = [task_graph.edges[edge].get('weight', 1.0) for edge in task_graph.edges()]
-
-        avg_task_weight = np.mean(task_weights) if task_weights else 1.0
-        original_avg_edge_weight = np.mean(original_edge_weights) if original_edge_weights else 1.0
-
-        # Generate random CCR using log-uniform distribution between 0.1 and 5
-        target_ccr = np.exp(np.random.uniform(np.log(0.1), np.log(5.0)))
-
-        # Scale edge weights to achieve target CCR
-        # CCR = avg_edge_weight / avg_task_weight
-        # target_ccr = new_avg_edge_weight / avg_task_weight
-        # new_avg_edge_weight = target_ccr * avg_task_weight
-        scaling_factor = (target_ccr * avg_task_weight) / original_avg_edge_weight if original_avg_edge_weight > 0 else 1.0
-
-        # Apply scaling to all edge weights
-        for u, v in task_graph.edges():
-            original_weight = task_graph.edges[u, v].get('weight', 1.0)
-            task_graph.edges[u, v]['weight'] = original_weight * scaling_factor
-
-        # Calculate new average edge weight after scaling
-        scaled_edge_weights = [task_graph.edges[edge].get('weight', 1.0) for edge in task_graph.edges()]
-        avg_edge_weight = np.mean(scaled_edge_weights) if scaled_edge_weights else 1.0
-
-        # Generate BSP hardware with random sync time
-        # saga_networks = gen_random_networks(num=1, num_nodes=64)
-        # saga_network = saga_networks[0]
-        
-        bsp_hardware = IPUHardware(num_tiles=self.get_num_tiles(), sync_time=0.0)  # Placeholder sync_time, will be set below
-        network = bsp_hardware.network
-
-        # Calculate network compute speed (average node processing speed)
-        network_node_weights = [network.nodes[node].get('weight', 1.0) for node in network.nodes()]
-        avg_compute_speed = np.mean(network_node_weights) if network_node_weights else 1.0
-
-        bsp_hardware.sync_time = self.get_sync_time(avg_task_weight, avg_compute_speed)
-
-        # Create metadata
-        metadata = TaskGraphMetadata(
-            recipe_name=recipe_name,
-            num_tasks=task_count,
-            avg_task_weight=avg_task_weight,
-            avg_edge_weight=avg_edge_weight,
-            task_count=len(task_graph.nodes()),
-            edge_count=len(task_graph.edges()),
-            target_ccr=target_ccr,
-            sync_time=bsp_hardware.sync_time
-        )
-
-        return task_graph, bsp_hardware, metadata
-
-    def get_cached_dataset_path(self, recipe_name: str) -> pathlib.Path:
-        """Get path for cached dataset file."""
-        return self.cache_dir / f"{recipe_name}_cached.pkl"
-
-    def get_cached_hardware_path(self, recipe_name: str) -> pathlib.Path:
-        """Get path for cached BSP hardware file."""
-        return self.cache_dir / f"{recipe_name}_hardware.pkl"
-
-    def get_metadata_path(self, recipe_name: str) -> pathlib.Path:
-        """Get path for dataset metadata file."""
-        return self.cache_dir / f"{recipe_name}_metadata.json"
-
-    def load_cached_dataset(self, recipe_name: str) -> Optional[Tuple[List[nx.DiGraph], List[BSPHardware], List[TaskGraphMetadata]]]:
-        """Load cached dataset if it exists.
-
-        Args:
-            recipe_name: Name of the recipe
-
-        Returns:
-            Tuple of (task_graphs, bsp_hardware_list, metadata_list) or None if not cached
-        """
-        cache_path = self.get_cached_dataset_path(recipe_name)
-        hardware_path = self.get_cached_hardware_path(recipe_name)
-        metadata_path = self.get_metadata_path(recipe_name)
-
-        if not cache_path.exists() or not hardware_path.exists() or not metadata_path.exists():
-            return None
-
+    # Check cache first
+    if not overwrite_cache and cache_path.exists():
         try:
-            # Load task graphs
             with open(cache_path, 'rb') as f:
-                task_graphs = pickle.load(f)
-
-            # Load BSP hardware
-            with open(hardware_path, 'rb') as f:
-                bsp_hardware_list = pickle.load(f)
-
-            # Load metadata
-            with open(metadata_path, 'r') as f:
-                metadata_dicts = json.load(f)
-                metadata_list = [TaskGraphMetadata(**md) for md in metadata_dicts]
-
-            logger.info(f"Loaded cached dataset for {recipe_name}: {len(task_graphs)} variations")
-            return task_graphs, bsp_hardware_list, metadata_list
-
+                dataset_items, _ = pickle.load(f)
+            logger.info(f"Loaded cached WfCommons dataset {cache_key}: {len(dataset_items)} items")
+            return dataset_items, dataset_display_name
         except Exception as e:
-            logger.warning(f"Failed to load cached dataset for {recipe_name}: {e}")
-            return None
+            logger.warning(f"Failed to load cached dataset {cache_key}: {e}")
 
-    def save_dataset(self, recipe_name: str, task_graphs: List[nx.DiGraph],
-                     bsp_hardware_list: List[BSPHardware], metadata_list: List[TaskGraphMetadata]) -> None:
-        """Save dataset to cache.
+    logger.info(f"Generating WfCommons dataset for {recipe_name}...")
 
-        Args:
-            recipe_name: Name of the recipe
-            task_graphs: List of generated task graphs
-            bsp_hardware_list: List of BSP hardware configurations
-            metadata_list: List of metadata for each task graph
-        """
-        cache_path = self.get_cached_dataset_path(recipe_name)
-        hardware_path = self.get_cached_hardware_path(recipe_name)
-        metadata_path = self.get_metadata_path(recipe_name)
+    dataset_items = []
+    total_variations = len(tile_counts) * variations_per_tile
+    variation_count = 0
 
-        # Save task graphs
-        with open(cache_path, 'wb') as f:
-            pickle.dump(task_graphs, f)
-
-        # Save BSP hardware
-        with open(hardware_path, 'wb') as f:
-            pickle.dump(bsp_hardware_list, f)
-
-        # Save metadata as JSON
-        metadata_dicts = [
-            {
-                'recipe_name': md.recipe_name,
-                'num_tasks': md.num_tasks,
-                'avg_task_weight': md.avg_task_weight,
-                'avg_edge_weight': md.avg_edge_weight,
-                'task_count': md.task_count,
-                'edge_count': md.edge_count,
-                'target_ccr': md.target_ccr,
-                'sync_time': md.sync_time
-            }
-            for md in metadata_list
-        ]
-
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata_dicts, f, indent=2)
-
-        logger.info(f"Cached dataset for {recipe_name}: {len(task_graphs)} variations")
-
-    def generate_recipe_dataset(self, recipe_name: str, overwrite: bool = False) -> Tuple[List[nx.DiGraph], List[BSPHardware], List[TaskGraphMetadata]]:
-        """Generate dataset for a specific recipe.
-
-        Args:
-            recipe_name: Name of the WfCommons recipe
-            overwrite: Whether to overwrite cached data
-
-        Returns:
-            Tuple of (task_graphs, bsp_hardware_list, metadata_list)
-        """
-        # Check cache first
-        if not overwrite:
-            cached_data = self.load_cached_dataset(recipe_name)
-            if cached_data is not None:
-                return cached_data
-
-        logger.info(f"Generating dataset for {recipe_name}...")
-
-        # Get task count range for this recipe
-        min_tasks, max_tasks = self.TASK_COUNT_RANGES[recipe_name]
-
-        task_graphs = []
-        bsp_hardware_list = []
-        metadata_list = []
-
-        # Generate variations
-        for i in range(self.num_variations):
-            # Random task count for this variation
-            task_count = random.randint(min_tasks, max_tasks)
+    for tile_count in tile_counts:
+        for variation_idx in range(variations_per_tile):
+            variation_count += 1
 
             try:
-                task_graph, bsp_hardware, metadata = self.generate_task_graph(recipe_name, task_count)
-                task_graphs.append(task_graph)
-                bsp_hardware_list.append(bsp_hardware)
-                metadata_list.append(metadata)
+                # Set deterministic seed for reproducibility
+                seed = hash(f"wfcommons_{recipe_name}_{tile_count}_{variation_idx}") % (2**32)
+                random.seed(seed)
+                np.random.seed(seed)
 
-                if (i + 1) % 10 == 0:
-                    logger.info(f"Generated {i + 1}/{self.num_variations} variations for {recipe_name}")
+                # Generate base task graph
+                task_graph, base_metadata = wf_generator.generate_task_graph(
+                    recipe_name, task_count=task_count
+                )
+
+                bsp_hardware = IPUHardware(num_tiles=tile_count, sync_time=0)
+
+                # Sync time = 1% of average computation time
+                bsp_hardware.sync_time = base_metadata.avg_task_weight / bsp_hardware.avg_computation_speed * 0.01
+
+                # Apply random CCR adjustment
+                target_ccr = 0.1
+                adjust_task_graph_to_ccr(task_graph, bsp_hardware.network, target_ccr)
+
+                # Calculate final CCR for metadata
+                final_ccr = calculate_ccr(task_graph, bsp_hardware.network)
+
+                # Create metadata
+                metadata = {
+                    'source_type': 'wfcommons',
+                    'source_name': recipe_name,
+                    'dataset_name': dataset_display_name,
+                    'task_count': base_metadata.task_count,
+                    'edge_count': base_metadata.edge_count,
+                    'avg_task_weight': base_metadata.avg_task_weight,
+                    'avg_edge_weight': base_metadata.avg_edge_weight,
+                    'num_tiles': tile_count,
+                    'sync_time': bsp_hardware.sync_time,
+                    'target_ccr': target_ccr,
+                    'actual_ccr': final_ccr,
+                    'base_metadata': base_metadata.additional_info
+                }
+
+                dataset_items.append(DatasetItem(task_graph=task_graph, hardware=bsp_hardware, metadata=metadata))
+
+                if variation_count % 5 == 0:
+                    logger.info(f"Generated {variation_count}/{total_variations} WfCommons variations")
 
             except Exception as e:
-                logger.warning(f"Failed to generate variation {i + 1} for {recipe_name}: {e}")
+                logger.warning(f"Failed to generate WfCommons variation {variation_count}: {e}")
                 continue
 
-        # Save to cache
-        if task_graphs:
-            self.save_dataset(recipe_name, task_graphs, bsp_hardware_list, metadata_list)
+    # Reset random seeds
+    random.seed(None)
+    np.random.seed(None)
 
-        return task_graphs, bsp_hardware_list, metadata_list
+    # Save to cache
+    if dataset_items:
+        dataset_metadata = DatasetMetadata(
+            source_type='wfcommons',
+            source_name=recipe_name,
+            dataset_name=dataset_display_name,
+            num_variations=len(dataset_items),
+            tile_counts=tile_counts,
+            generated_timestamp=str(np.datetime64('now')),
+            additional_info={'task_count': task_count} if task_count else None
+        )
 
-    def generate_all_datasets(self, overwrite: bool = False) -> Dict[str, Tuple[List[nx.DiGraph], List[BSPHardware], List[TaskGraphMetadata]]]:
-        """Generate datasets for all recipes.
+        with open(cache_path, 'wb') as f:
+            pickle.dump((dataset_items, dataset_metadata), f)
+        logger.info(f"Cached WfCommons dataset {cache_key}: {len(dataset_items)} items")
 
-        Args:
-            overwrite: Whether to overwrite cached data
+    return dataset_items, dataset_display_name
 
-        Returns:
-            Dictionary mapping recipe names to (task_graphs, bsp_hardware_list, metadata_list)
-        """
-        datasets = {}
 
-        for recipe_name in self.RECIPES.keys():
+def generate_spn_dataset(cache_dir: pathlib.Path, spn_filename: str,
+                         spn_data_dir: Optional[pathlib.Path] = None,
+                         tile_counts: List[int] = [4, 16, 32, 92],
+                         overwrite_cache: bool = False) -> Tuple[List[DatasetItem], str]:
+    """Generate datasets for Sum-Product Networks.
+
+    Args:
+        cache_dir: Directory to store cached datasets
+        spn_filename: SPN filename
+        spn_data_dir: Directory containing SPN data files
+        tile_counts: List of tile counts to generate for
+        overwrite_cache: Whether to overwrite existing cache
+
+    Returns:
+        Tuple of (dataset_items, dataset_display_name)
+    """
+    # Set up SPN data directory
+    if spn_data_dir is None:
+        spn_data_dir = pathlib.Path(__file__).parent.parent.parent.parent / "data" / "spn"
+
+    if not spn_data_dir.exists():
+        raise ValueError(f"SPN data directory not found: {spn_data_dir}")
+
+    spn_generator = SPNTaskGraphGenerator(cache_dir=cache_dir, spn_schema_path=spn_data_dir / "spflow.capnp")
+    dataset_display_name = spn_filename.split('_')[0]  # Use filename until first underscore
+
+    # Create cache key
+    cache_key = f"spn_{spn_filename.replace('.', '_').replace('/', '_')}"
+    cache_path = cache_dir / f"{cache_key}_dataset.pkl"
+
+    # Check cache first
+    if not overwrite_cache and cache_path.exists():
+        try:
+            with open(cache_path, 'rb') as f:
+                dataset_items, _ = pickle.load(f)
+            logger.info(f"Loaded cached SPN dataset {cache_key}: {len(dataset_items)} items")
+            return dataset_items, dataset_display_name
+        except Exception as e:
+            logger.warning(f"Failed to load cached dataset {cache_key}: {e}")
+
+    logger.info(f"Generating SPN dataset for {spn_filename}...")
+
+    dataset_items = []
+    variation_count = 0
+
+    for tile_count in tile_counts:
+        variation_count += 1
+
+        try:
+            # Set deterministic seed for reproducibility
+            seed = hash(f"spn_{spn_filename}_{tile_count}") % (2**32)
+            random.seed(seed)
+            np.random.seed(seed)
+
+            # Generate SPN task graph with natural bit/cycle weights
+            spn_path = spn_data_dir / spn_filename
+            task_graph, base_metadata = spn_generator.generate_task_graph(str(spn_path))
+
+            # Create IPU hardware with sync time = 100 cycles
+            bsp_hardware = IPUHardware(num_tiles=tile_count, sync_time=100.0)
+
+            # Calculate natural CCR for metadata
+            final_ccr = calculate_ccr(task_graph, bsp_hardware.network)
+
+            # Create metadata
+            metadata = {
+                'source_type': 'spn',
+                'source_name': spn_filename,
+                'dataset_name': dataset_display_name,
+                'task_count': base_metadata.task_count,
+                'edge_count': base_metadata.edge_count,
+                'avg_task_weight': base_metadata.avg_task_weight,
+                'avg_edge_weight': base_metadata.avg_edge_weight,
+                'num_tiles': tile_count,
+                'sync_time': bsp_hardware.sync_time,
+                'target_ccr': None,  # No CCR adjustment for SPNs
+                'actual_ccr': final_ccr,
+                'base_metadata': base_metadata.additional_info
+            }
+
+            dataset_items.append(DatasetItem(task_graph=task_graph, hardware=bsp_hardware, metadata=metadata))
+
+            if variation_count % 5 == 0:
+                logger.info(f"Generated {variation_count}/{len(tile_counts)} SPN variations")
+
+        except Exception as e:
+            logger.warning(f"Failed to generate SPN variation {variation_count}: {e}")
+            continue
+
+    # Reset random seeds
+    random.seed(None)
+    np.random.seed(None)
+
+    # Save to cache
+    if dataset_items:
+        dataset_metadata = DatasetMetadata(
+            source_type='spn',
+            source_name=spn_filename,
+            dataset_name=dataset_display_name,
+            num_variations=len(dataset_items),
+            tile_counts=tile_counts,
+            generated_timestamp=str(np.datetime64('now'))
+        )
+
+        with open(cache_path, 'wb') as f:
+            pickle.dump((dataset_items, dataset_metadata), f)
+        logger.info(f"Cached SPN dataset {cache_key}: {len(dataset_items)} items")
+
+    return dataset_items, dataset_display_name
+
+
+def generate_wfcommons_datasets(cache_dir: pathlib.Path,
+                               task_count: Optional[int] = None,
+                               tile_counts: List[int] = [4, 16, 32, 92],
+                               variations_per_tile: int = 3,
+                               overwrite_cache: bool = False) -> Dict[str, Tuple[List[DatasetItem], str]]:
+    """Generate datasets for all available WfCommons recipes.
+
+    Args:
+        cache_dir: Directory to store cached datasets
+        task_count: Number of tasks (optional)
+        tile_counts: List of tile counts to generate for
+        variations_per_tile: Number of variations per tile count
+        overwrite_cache: Whether to overwrite existing cache
+
+    Returns:
+        Dictionary mapping dataset keys to (dataset_items, dataset_display_name)
+    """
+    wf_generator = WfCommonsTaskGraphGenerator(cache_dir=cache_dir)
+    available_recipes = wf_generator.list_available_recipes()
+
+    datasets = {}
+    for recipe_name in available_recipes:
+        try:
+            dataset_items, display_name = generate_wfcommons_dataset(
+                cache_dir=cache_dir,
+                recipe_name=recipe_name,
+                task_count=task_count,
+                tile_counts=tile_counts,
+                variations_per_tile=variations_per_tile,
+                overwrite_cache=overwrite_cache
+            )
+            datasets[f"wfcommons_{recipe_name}"] = (dataset_items, display_name)
+            logger.info(f"Generated WfCommons dataset: {recipe_name} ({len(dataset_items)} items)")
+        except Exception as e:
+            logger.error(f"Failed to generate WfCommons dataset {recipe_name}: {e}")
+
+    return datasets
+
+
+def generate_spn_datasets(cache_dir: pathlib.Path,
+                         spn_data_dir: Optional[pathlib.Path] = None,
+                         tile_counts: List[int] = [4, 16, 32, 92],
+                         overwrite_cache: bool = False) -> Dict[str, Tuple[List[DatasetItem], str]]:
+    """Generate datasets for all available SPN files.
+
+    Args:
+        cache_dir: Directory to store cached datasets
+        spn_data_dir: Directory containing SPN data files
+        tile_counts: List of tile counts to generate for
+        overwrite_cache: Whether to overwrite existing cache
+
+    Returns:
+        Dictionary mapping dataset keys to (dataset_items, dataset_display_name)
+    """
+    # Set up SPN data directory
+    if spn_data_dir is None:
+        spn_data_dir = pathlib.Path(__file__).parent.parent.parent.parent / "data" / "spn"
+
+    if not spn_data_dir.exists():
+        logger.warning(f"SPN data directory not found: {spn_data_dir}")
+        return {}
+
+    spn_generator = SPNTaskGraphGenerator(cache_dir=cache_dir, spn_schema_path=spn_data_dir / "spflow.capnp")
+    available_spns = spn_generator.list_available_spns(spn_data_dir)
+
+    datasets = {}
+    for spn_filename in available_spns:
+        try:
+            dataset_items, display_name = generate_spn_dataset(
+                cache_dir=cache_dir,
+                spn_filename=spn_filename,
+                spn_data_dir=spn_data_dir,
+                tile_counts=tile_counts,
+                overwrite_cache=overwrite_cache
+            )
+            datasets[f"spn_{spn_filename.replace('.', '_')}"] = (dataset_items, display_name)
+            logger.info(f"Generated SPN dataset: {spn_filename} ({len(dataset_items)} items)")
+        except Exception as e:
+            logger.error(f"Failed to generate SPN dataset {spn_filename}: {e}")
+
+    return datasets
+
+
+def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
+                               tile_counts: List[int] = [4, 16, 32, 92],
+                               variations_per_tile: int = 3,
+                               overwrite_cache: bool = False) -> Tuple[List[DatasetItem], str]:
+    """Generate dataset for a primitive graph type using SAGA.
+
+    Args:
+        cache_dir: Directory to store cached datasets
+        graph_type: Type of graph ('in_tree', 'out_tree', 'parallel_chains')
+        tile_counts: List of tile counts to generate for
+        variations_per_tile: Number of variations per tile count
+        overwrite_cache: Whether to overwrite existing cache
+
+    Returns:
+        Tuple of (dataset_items, dataset_display_name)
+    """
+    # Hardcoded configurations for each graph type
+    if graph_type == 'in_tree':
+        num_levels = 4
+        branching_factor = 3
+        config_str = f"{num_levels}_{branching_factor}"
+    elif graph_type == 'out_tree':
+        num_levels = 4
+        branching_factor = 3
+        config_str = f"{num_levels}_{branching_factor}"
+    elif graph_type == 'parallel_chains':
+        num_chains = 5
+        chain_length = 4
+        config_str = f"{num_chains}_{chain_length}"
+    else:
+        raise ValueError(f"Unsupported graph type: {graph_type}")
+
+    dataset_display_name = f"{graph_type}_{config_str}"
+
+    # Create cache key
+    cache_key = f"primitives_{graph_type}_{config_str}"
+    cache_path = cache_dir / f"{cache_key}_dataset.pkl"
+
+    # Check cache first
+    if not overwrite_cache and cache_path.exists():
+        try:
+            with open(cache_path, 'rb') as f:
+                dataset_items, _ = pickle.load(f)
+            logger.info(f"Loaded cached primitives dataset {cache_key}: {len(dataset_items)} items")
+            return dataset_items, dataset_display_name
+        except Exception as e:
+            logger.warning(f"Failed to load cached dataset {cache_key}: {e}")
+
+    logger.info(f"Generating primitives dataset for {graph_type} with config {config_str}...")
+
+    dataset_items = []
+    total_variations = len(tile_counts) * variations_per_tile
+    variation_count = 0
+
+    for tile_count in tile_counts:
+        for variation_idx in range(variations_per_tile):
+            variation_count += 1
+
             try:
-                task_graphs, bsp_hardware_list, metadata_list = self.generate_recipe_dataset(recipe_name, overwrite)
-                datasets[recipe_name] = (task_graphs, bsp_hardware_list, metadata_list)
-                logger.info(f"Dataset {recipe_name}: {len(task_graphs)} variations generated")
+                # Set deterministic seed for reproducibility
+                seed = hash(f"primitives_{graph_type}_{config_str}_{tile_count}_{variation_idx}") % (2**32)
+                random.seed(seed)
+                np.random.seed(seed)
+
+                # Generate primitive graph using SAGA
+                if graph_type == 'in_tree':
+                    task_graphs = gen_in_trees(1, num_levels, branching_factor)
+                elif graph_type == 'out_tree':
+                    task_graphs = gen_out_trees(1, num_levels, branching_factor)
+                elif graph_type == 'parallel_chains':
+                    task_graphs = gen_parallel_chains(1, num_chains, chain_length)
+
+                task_graph = task_graphs[0]
+
+                bsp_hardware = IPUHardware(num_tiles=tile_count, sync_time=0)
+
+                # Calculate average task weight for sync time calculation
+                avg_task_weight = np.mean([task_graph.nodes[node]['weight'] for node in task_graph.nodes()])
+                bsp_hardware.sync_time = avg_task_weight / bsp_hardware.avg_computation_speed * 0.01
+
+                # Apply random CCR adjustment
+                target_ccr = 0.1
+                adjust_task_graph_to_ccr(task_graph, bsp_hardware.network, target_ccr)
+
+                # Calculate final CCR for metadata
+                final_ccr = calculate_ccr(task_graph, bsp_hardware.network)
+
+                # Calculate metadata
+                avg_edge_weight = np.mean([task_graph.edges[edge]['weight'] for edge in task_graph.edges()]) if task_graph.edges() else 0
+
+                # Create metadata
+                metadata = {
+                    'source_type': 'primitives',
+                    'source_name': f"{graph_type}_{config_str}",
+                    'dataset_name': dataset_display_name,
+                    'task_count': len(task_graph.nodes()),
+                    'edge_count': len(task_graph.edges()),
+                    'avg_task_weight': avg_task_weight,
+                    'avg_edge_weight': avg_edge_weight,
+                    'num_tiles': tile_count,
+                    'sync_time': bsp_hardware.sync_time,
+                    'target_ccr': target_ccr,
+                    'actual_ccr': final_ccr,
+                    'graph_type': graph_type,
+                    'base_metadata': None
+                }
+
+                dataset_items.append(DatasetItem(task_graph=task_graph, hardware=bsp_hardware, metadata=metadata))
+
+                if variation_count % 5 == 0:
+                    logger.info(f"Generated {variation_count}/{total_variations} {graph_type} variations")
 
             except Exception as e:
-                logger.error(f"Failed to generate dataset for {recipe_name}: {e}")
+                logger.warning(f"Failed to generate {graph_type} variation {variation_count}: {e}")
+                continue
 
-        return datasets
+    # Reset random seeds
+    random.seed(None)
+    np.random.seed(None)
 
-    def adapt_task_graph_for_ccr(self, task_graph: nx.DiGraph, metadata: TaskGraphMetadata,
-                                 target_ccr: float) -> nx.DiGraph:
-        """Adapt task graph edge weights to achieve target CCR.
+    # Save to cache
+    if dataset_items:
+        dataset_metadata = DatasetMetadata(
+            source_type='primitives',
+            source_name=f"{graph_type}_{config_str}",
+            dataset_name=dataset_display_name,
+            num_variations=len(dataset_items),
+            tile_counts=tile_counts,
+            generated_timestamp=str(np.datetime64('now')),
+            additional_info={'graph_type': graph_type}
+        )
 
-        Args:
-            task_graph: Original task graph
-            metadata: Task graph metadata
-            target_ccr: Target communication-to-computation ratio
+        with open(cache_path, 'wb') as f:
+            pickle.dump((dataset_items, dataset_metadata), f)
+        logger.info(f"Cached primitives dataset {cache_key}: {len(dataset_items)} items")
 
-        Returns:
-            Task graph with adapted edge weights
-        """
-        adapted_graph = task_graph.copy()
+    return dataset_items, dataset_display_name
 
-        # Calculate scaling factor for edge weights
-        # CCR = (avg_edge_weight / avg_task_weight)
-        # target_ccr = (new_avg_edge_weight / avg_task_weight)
-        # scaling_factor = target_ccr * avg_task_weight / avg_edge_weight
 
-        if metadata.avg_edge_weight > 0:
-            scaling_factor = target_ccr * metadata.avg_task_weight / metadata.avg_edge_weight
+def generate_primitives_datasets(cache_dir: pathlib.Path,
+                                tile_counts: List[int] = [4, 16, 32, 92],
+                                variations_per_tile: int = 3,
+                                overwrite_cache: bool = False) -> Dict[str, Tuple[List[DatasetItem], str]]:
+    """Generate datasets for all primitive graph types.
 
-            # Scale all edge weights
-            for u, v in adapted_graph.edges():
-                original_weight = adapted_graph.edges[u, v].get('weight', 1.0)
-                adapted_graph.edges[u, v]['weight'] = original_weight * scaling_factor
+    Args:
+        cache_dir: Directory to store cached datasets
+        tile_counts: List of tile counts to generate for
+        variations_per_tile: Number of variations per tile count
+        overwrite_cache: Whether to overwrite existing cache
 
-        return adapted_graph
+    Returns:
+        Dictionary mapping dataset keys to (dataset_items, dataset_display_name)
+    """
+    datasets = {}
+    primitive_types = ['in_tree', 'out_tree', 'parallel_chains']
+
+    for graph_type in primitive_types:
+        try:
+            dataset_items, display_name = generate_primitives_dataset(
+                cache_dir=cache_dir,
+                graph_type=graph_type,
+                tile_counts=tile_counts,
+                variations_per_tile=variations_per_tile,
+                overwrite_cache=overwrite_cache
+            )
+            datasets[f"primitives_{display_name}"] = (dataset_items, display_name)
+            logger.info(f"Generated {graph_type} primitives dataset ({len(dataset_items)} items)")
+        except Exception as e:
+            logger.error(f"Failed to generate {graph_type} primitives dataset: {e}")
+
+    return datasets
+
+
+# Reusable dataset parsing functions
+def load_dataset(dataset_path: pathlib.Path) -> Tuple[List[DatasetItem], DatasetMetadata]:
+    """Reusable function to load a dataset from a pickle file.
+
+    Args:
+        dataset_path: Path to the dataset pickle file
+
+    Returns:
+        Tuple of (dataset_items, dataset_metadata)
+
+    Raises:
+        FileNotFoundError: If dataset file doesn't exist
+        ValueError: If dataset file is corrupted
+    """
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Dataset file not found: {dataset_path}")
+
+    try:
+        with open(dataset_path, 'rb') as f:
+            dataset_items, dataset_metadata = pickle.load(f)
+
+        # Validate loaded data
+        if not isinstance(dataset_items, list) or not isinstance(dataset_metadata, DatasetMetadata):
+            raise ValueError("Invalid dataset format")
+
+        logger.info(f"Loaded dataset: {len(dataset_items)} items, source: {dataset_metadata.source_type}:{dataset_metadata.source_name}")
+        return dataset_items, dataset_metadata
+
+    except Exception as e:
+        raise ValueError(f"Failed to load dataset from {dataset_path}: {e}")
+
+
+def find_datasets(cache_dir: pathlib.Path, source_type: Optional[str] = None) -> List[pathlib.Path]:
+    """Find available dataset files in cache directory.
+
+    Args:
+        cache_dir: Directory to search for datasets
+        source_type: Filter by source type ('wfcommons' or 'spn'), None for all
+
+    Returns:
+        List of dataset file paths
+    """
+    if not cache_dir.exists():
+        return []
+
+    pattern = "*_dataset.pkl"
+    if source_type:
+        pattern = f"{source_type}_*_dataset.pkl"
+
+    return list(cache_dir.glob(pattern))
+
+
+def parse_dataset_for_experiments(dataset_items: List[DatasetItem]) -> Tuple[List[nx.DiGraph], List[BSPHardware], List[Dict]]:
+    """Parse dataset items into separate lists for experiments.
+
+    This is a compatibility function for existing benchmark code.
+
+    Args:
+        dataset_items: List of dataset items
+
+    Returns:
+        Tuple of (task_graphs, hardware_list, metadata_list)
+    """
+    task_graphs = [item.task_graph for item in dataset_items]
+    hardware_list = [item.hardware for item in dataset_items]
+    metadata_list = [item.metadata for item in dataset_items]
+
+    return task_graphs, hardware_list, metadata_list
+
+
+def get_dataset_statistics(dataset_items: List[DatasetItem]) -> Dict[str, Any]:
+    """Get statistics for a dataset.
+
+    Args:
+        dataset_items: List of dataset items
+
+    Returns:
+        Dictionary with dataset statistics
+    """
+    if not dataset_items:
+        return {'num_items': 0}
+
+    # Calculate statistics
+    task_counts = [item.metadata['task_count'] for item in dataset_items]
+    edge_counts = [item.metadata['edge_count'] for item in dataset_items]
+    tile_counts = [item.metadata['num_tiles'] for item in dataset_items]
+    ccrs = [item.metadata.get('actual_ccr', 0) for item in dataset_items]
+
+    stats = {
+        'num_items': len(dataset_items),
+        'source_type': dataset_items[0].metadata['source_type'],
+        'source_name': dataset_items[0].metadata['source_name'],
+        'task_count_range': (min(task_counts), max(task_counts)),
+        'edge_count_range': (min(edge_counts), max(edge_counts)),
+        'tile_count_range': (min(tile_counts), max(tile_counts)),
+        'ccr_range': (min(ccrs), max(ccrs)),
+        'avg_ccr': np.mean(ccrs),
+    }
+
+    return stats
