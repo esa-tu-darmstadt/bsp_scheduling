@@ -162,6 +162,9 @@ def _EFT_scheduling(
     group_weights: List[float],
     processors: List[Hashable],
     processor_speeds: Dict[Hashable, float],
+    task_graph: nx.DiGraph,
+    hardware: BSPHardware,
+    schedule: "BSPSchedule",
 ) -> Tuple[float, List[Hashable]]:
     """Schedule groups using earliest finish time (EFT) approach considering processor speeds.
 
@@ -192,7 +195,52 @@ def _EFT_scheduling(
             # Calculate when this group would finish on this processor
             speed = processor_speeds[proc]
             duration = weight / speed
-            finish_time = processor_finish_times[proc] + duration
+            compute_time = processor_finish_times[proc] + duration
+            # Calculate inter-processor communication time for this group on this processor
+            # This is the additional communication needed for predecessors not available locally
+            interproc_comm_time = 0.0
+            group = groups[idx]
+
+            for task_node in group:
+                # Check predecessors of each task in this group
+                for pred_task in task_graph.predecessors(task_node):
+                    # Check if predecessor is already available locally on this processor
+                    pred_instances = schedule.get_all_instances(pred_task)
+                    local_instance_available = False
+
+                    for pred_instance in pred_instances:
+                        if pred_instance.proc == proc:
+                            # Predecessor already available on this processor
+                            local_instance_available = True
+                            break
+
+                    if not local_instance_available and pred_instances:
+                        # Need to communicate from another processor
+                        # Find the instance with fastest communication to this processor
+                        best_comm_time = float('inf')
+
+                        for pred_instance in pred_instances:
+                            source_proc = pred_instance.proc
+
+                            # Calculate communication time from source processor
+                            if hardware.network.has_edge(source_proc, proc):
+                                network_speed = hardware.network.edges[source_proc, proc]['weight']
+                            elif hardware.network.has_edge(proc, source_proc):
+                                network_speed = hardware.network.edges[proc, source_proc]['weight']
+                            else:
+                                continue  # Skip if no connection exists
+
+                            comm_weight = task_graph.edges[pred_task, task_node]['weight']
+                            comm_time = comm_weight / network_speed
+
+                            if comm_time < best_comm_time:
+                                best_comm_time = comm_time
+
+                        # Add the best communication time for this predecessor
+                        if best_comm_time < float('inf'):
+                            interproc_comm_time += best_comm_time 
+            
+            finish_time = compute_time + interproc_comm_time 
 
             if finish_time < best_finish_time:
                 best_finish_time = finish_time
@@ -212,6 +260,9 @@ def _choose_P_processor_saving_EFT(
     weights: Sequence[float],
     processors: List[Hashable],
     processor_speeds: Dict[Hashable, float],
+    task_graph: nx.DiGraph,
+    hardware: BSPHardware,
+    schedule: "BSPSchedule",
 ) -> Tuple[int, float, List[Hashable]]:
     """Choose P processors minimizing makespan using EFT, with processor saving.
 
@@ -244,7 +295,7 @@ def _choose_P_processor_saving_EFT(
         active_speeds = {p: processor_speeds[p] for p in active_procs}
 
         makespan, assign = _EFT_scheduling(
-            groups, list(weights), active_procs, active_speeds
+            groups, list(weights), active_procs, active_speeds, task_graph, hardware, schedule
         )
 
         if makespan < best_makespan - 1e-12:
@@ -261,7 +312,7 @@ def _choose_P_processor_saving_EFT(
 
 
 def _group_layers(
-    G: nx.DiGraph, p: int, verbose: bool = False
+    G: nx.DiGraph, p: int, verbose: bool = False, use_eft = False
 ) -> List[List[Set[Hashable]]]:
     """Implement Algorithm 4.4 to construct group layers.
 
@@ -305,6 +356,8 @@ def _group_layers(
         # Repeat merging until no merge occurs in a full pass
         merged_in_pass = True
         while merged_in_pass:
+            if use_eft:
+                break
             merged_in_pass = False
             # Sort groups by weight increasing
             CC_sorted = sorted(CC, key=lambda C: _omega_of_nodes(G, C))
@@ -355,7 +408,7 @@ def _group_layers(
             for lev in range(next_level + 1, lmax + 1):
                 remain_nodes.extend(V_levels.get(lev, []))
             t_remain = _omega_of_nodes(G, remain_nodes)
-            if t_remain >= (t_remain / max(1, p)) + tau_max - 1e-12:
+            if t_remain >= (t_remain / max(1, p)) + tau_max - 1e-12 or use_eft:
                 # Enforce balancedness
                 LM_val = LM_of_groups(CC, p)
                 W_val = layer_weight(CC)
@@ -441,7 +494,7 @@ class BCSHScheduler(BSPScheduler):
             logger.debug("Starting BCSH scheduling")
 
         # 1) Build group layers (L1 closest to exits)
-        layers = _group_layers(task_graph, p, verbose=self.verbose)
+        layers = _group_layers(task_graph, p, verbose=self.verbose, use_eft=self.use_eft)
         if self.verbose:
             logger.debug(f"Constructed {len(layers)} group layers")
 
@@ -466,7 +519,7 @@ class BCSHScheduler(BSPScheduler):
             if self.use_eft:
                 # Use EFT-based scheduling with processor speeds
                 P, _, assignment = _choose_P_processor_saving_EFT(
-                    layer_groups, group_weights, processors_all, processor_speeds
+                    layer_groups, group_weights, processors_all, processor_speeds, task_graph, hardware, schedule
                 )
                 active_procs = processors_all[:P]
             else:
