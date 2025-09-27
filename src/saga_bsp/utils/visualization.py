@@ -513,7 +513,7 @@ def draw_busy_comm_gantt(schedule: Dict[Hashable, List],
                     axis.add_patch(rect_comm)
                     
                     # Add label for communicated predecessors if available
-                    if hasattr(task, 'comm_predecessors') and task.comm_predecessors and comm_duration > 0:
+                    if draw_task_labels and hasattr(task, 'comm_predecessors') and task.comm_predecessors and comm_duration > 0:
                         # Create label like "T1,T2" for the predecessors being received
                         pred_label = ','.join(task.comm_predecessors)
                         axis.text(
