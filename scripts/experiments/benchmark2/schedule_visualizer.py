@@ -38,8 +38,10 @@ def save_schedule_visualization(schedule_result: Dict[str, Any],
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Create filename
+        folder = output_dir / dataset_name / f"task{task_graph_idx}"
+        folder.mkdir(parents=True, exist_ok=True)
         filename = f"{dataset_name}_{scheduler_name}_task{task_graph_idx}.png"
-        filepath = output_dir / filename
+        filepath = folder / filename
 
         # Create figure
         plt.figure(figsize=(12, 6))
@@ -96,4 +98,5 @@ def should_save_visualization(task_graph_idx: int, dataset_name: str,
         True if visualization should be saved
     """
     # Save only the first task graph for each dataset/scheduler combination
-    return task_graph_idx == 0
+    return True
+    return task_graph_idx == 1 or task_graph_idx == 4
