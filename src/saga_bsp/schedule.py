@@ -35,7 +35,8 @@ class BSPHardware:
     @cached_property 
     def avg_communication_speed(self) -> float:
         """Average communication speed across all network links (edge weights)"""
-        edge_weights = [self.network.edges[edge]['weight'] for edge in self.network.edges()]
+        # Ignore self-loops 
+        edge_weights = [0 if edge[0] == edge[1] else self.network.edges[edge]['weight'] for edge in self.network.edges()]
         
         return statistics.mean(edge_weights) if edge_weights else 0
 
