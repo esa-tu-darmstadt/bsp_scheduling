@@ -142,12 +142,13 @@ class BoxPlotVisualizer:
 
             ax = axes[i] if i < len(axes) else plt.subplot(rows, cols, i+1)
 
-            sns.boxplot(data=dataset_data, x='scheduler_display', y='makespan_ratio', ax=ax)
+            sns.boxplot(data=dataset_data, x='scheduler_display', y='makespan_ratio', ax=ax, log_scale=10)
 
             ax.set_title(f'{dataset.title()}', fontsize=12)
             ax.set_xlabel('')
             ax.set_ylabel('Makespan Ratio' if i % cols == 0 else '')
             ax.tick_params(axis='x', rotation=45)
+            ax.set_ylim(1, 10)
 
             # Mark delay model schedulers
             scheduler_names = dataset_data['scheduler'].unique()
