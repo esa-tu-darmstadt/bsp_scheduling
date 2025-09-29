@@ -118,37 +118,94 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
                     )
                     axis.add_patch(rect)
 
-                # Draw individual tasks
-                for task in tasks:
-                    task_start = proc_compute_start + task.rel_start
-                    task_duration = task.duration
-                    
-                    # Task rectangle
-                    rect = patches.Rectangle(
-                        (task_start, y_pos - 0.35),
-                        task_duration, 0.7,
-                        facecolor=colors['task'],
-                        edgecolor='black',
-                        linewidth=1.0
-                    )
-                    axis.add_patch(rect)
-                    
-                    # Task label
-                    if show_task_names and task_duration > max_time * 0.02:  # Only show label if task is wide enough
-                        axis.text(
-                            task_start + task_duration / 2, y_pos,
-                            task.node, ha='center', va='center',
-                            fontsize=font_size - 2, weight='bold'
+                # Draw individual tasks - optimize for many small tasks
+                total_tasks = sum(len(tasks) for tasks in superstep.tasks.values())
+                use_raster = total_tasks > 500 or len(tasks) > 50  # Use raster for dense visualizations
+
+                if use_raster and len(tasks) > 1:
+                    # Use imshow for dense task visualization to avoid artifacts
+                    time_resolution = min(1000, len(tasks) * 10)
+                    task_times = []
+                    task_starts = []
+
+                    for task in tasks:
+                        task_start = proc_compute_start + task.rel_start
+                        task_end = task_start + task.duration
+                        task_times.extend([task_start, task_end])
+                        task_starts.append(task_start)
+
+                    if task_times:
+                        min_time = min(task_times)
+                        max_time_local = max(task_times)
+                        time_range = max_time_local - min_time
+
+                        if time_range > 0:
+                            # Create raster representation
+                            time_bins = np.linspace(min_time, max_time_local, time_resolution)
+                            task_array = np.zeros((1, time_resolution))
+
+                            for task in tasks:
+                                task_start = proc_compute_start + task.rel_start
+                                task_end = task_start + task.duration
+                                start_idx = int((task_start - min_time) / time_range * (time_resolution - 1))
+                                end_idx = int((task_end - min_time) / time_range * (time_resolution - 1))
+                                task_array[0, start_idx:end_idx+1] = 1
+
+                            # Use imshow to draw task density
+                            im = axis.imshow(
+                                task_array,
+                                cmap='gray_r',  # White for tasks, black for gaps
+                                aspect='auto',
+                                extent=[min_time, max_time_local, y_pos - 0.35, y_pos + 0.35],
+                                vmin=0, vmax=1
+                            )
+
+                            # Add border around the processor row
+                            border_rect = patches.Rectangle(
+                                (min_time, y_pos - 0.35),
+                                time_range, 0.7,
+                                linewidth=1.0, edgecolor='black', facecolor='none'
+                            )
+                            axis.add_patch(border_rect)
+                else:
+                    # Use traditional rectangle approach for sparse visualizations
+                    for task in tasks:
+                        task_start = proc_compute_start + task.rel_start
+                        task_duration = task.duration
+
+                        # Task rectangle
+                        rect = patches.Rectangle(
+                            (task_start, y_pos - 0.35),
+                            task_duration, 0.7,
+                            facecolor=colors['task'],
+                            edgecolor='black',
+                            linewidth=1.0
                         )
+                        axis.add_patch(rect)
+
+                        # Task label
+                        if show_task_names and task_duration > max_time * 0.02:  # Only show label if task is wide enough
+                            axis.text(
+                                task_start + task_duration / 2, y_pos,
+                                task.node, ha='center', va='center',
+                                fontsize=font_size - 2, weight='bold'
+                            )
             
             # Draw superstep boundary line
             if superstep.index < len(bsp_schedule.supersteps) - 1:
                 axis.axvline(x=superstep.end_time, color='red', linestyle='--', alpha=0.8, linewidth=2)
         
-        # Formatting
+        # Formatting - use optimized y-axis for many processors
         if len(all_processors) <= 20:
             axis.set_yticks(list(y_positions.values()))
             axis.set_yticklabels(list(y_positions.keys()))
+        else:
+            # For many processors, show only every nth label to avoid overcrowding
+            step = max(1, len(all_processors) // 10)
+            y_ticks = list(range(0, len(all_processors), step))
+            y_labels = [all_processors[i] for i in y_ticks]
+            axis.set_yticks(y_ticks)
+            axis.set_yticklabels(y_labels)
         axis.set_xlabel('Time', fontsize=font_size)
         if y_label:
             axis.set_ylabel(y_label, fontsize=font_size)
@@ -496,10 +553,90 @@ def draw_busy_comm_gantt(schedule: Dict[Hashable, List],
         # Create y-position for each processor
         y_pos = {proc: i for i, proc in enumerate(processors)}
         
+        # Optimize for many tasks
+        total_tasks = sum(len(tasks) for tasks in schedule.values())
+        use_raster = total_tasks > 500  # Use raster for very dense visualizations
+
         # Draw tasks
         for proc, tasks in schedule.items():
             y = y_pos[proc]
-            
+
+            if use_raster and len(tasks) > 50:
+                # Use raster approach for dense task visualization
+                time_resolution = min(1000, len(tasks) * 10)
+                all_times = []
+
+                for task in tasks:
+                    all_times.extend([task.start, task.end])
+
+                if all_times:
+                    min_time = min(all_times)
+                    max_time_local = max(all_times)
+                    time_range = max_time_local - min_time
+
+                    if time_range > 0:
+                        # Create arrays for communication and computation
+                        comm_array = np.zeros((1, time_resolution))
+                        comp_array = np.zeros((1, time_resolution))
+
+                        for task in tasks:
+                            if hasattr(task, 'comm_time') and task.comm_time > 0:
+                                # Communication phase
+                                comm_start_idx = int((task.start - min_time) / time_range * (time_resolution - 1))
+                                comm_end_idx = int((task.start + task.comm_time - min_time) / time_range * (time_resolution - 1))
+                                comm_array[0, comm_start_idx:comm_end_idx+1] = 1
+
+                                # Computation phase
+                                comp_start_idx = comm_end_idx + 1
+                                comp_end_idx = int((task.end - min_time) / time_range * (time_resolution - 1))
+                                comp_array[0, comp_start_idx:comp_end_idx+1] = 1
+                            else:
+                                # Single computation block
+                                start_idx = int((task.start - min_time) / time_range * (time_resolution - 1))
+                                end_idx = int((task.end - min_time) / time_range * (time_resolution - 1))
+                                comp_array[0, start_idx:end_idx+1] = 1
+
+                        # Create custom colormaps for comm and comp
+                        from matplotlib.colors import ListedColormap
+
+                        # Communication colormap: transparent to teal
+                        comm_colors = ['white', '#4ECDC4']  # white to teal
+                        comm_cmap = ListedColormap(comm_colors)
+
+                        # Computation colormap: transparent to white
+                        comp_colors = ['white', '#FFFFFF']  # white to white (with different alpha)
+                        comp_cmap = ListedColormap(comp_colors)
+
+                        # Draw communication layer (teal)
+                        if np.any(comm_array):
+                            axis.imshow(
+                                comm_array,
+                                cmap=comm_cmap,
+                                aspect='auto',
+                                extent=[min_time, max_time_local, y - 0.4, y + 0.4],
+                                vmin=0, vmax=1, alpha=0.7
+                            )
+
+                        # Draw computation layer (white)
+                        if np.any(comp_array):
+                            axis.imshow(
+                                comp_array,
+                                cmap=comp_cmap,
+                                aspect='auto',
+                                extent=[min_time, max_time_local, y - 0.4, y + 0.4],
+                                vmin=0, vmax=1
+                            )
+
+                        # Add border around the processor row
+                        border_rect = patches.Rectangle(
+                            (min_time, y - 0.4),
+                            time_range, 0.8,
+                            linewidth=1.0, edgecolor='black', facecolor='none'
+                        )
+                        axis.add_patch(border_rect)
+
+                        continue  # Skip individual task drawing for this processor
+
             for task in tasks:
                 # Check if task has comm_time attribute
                 if hasattr(task, 'comm_time') and task.comm_time > 0:
@@ -554,10 +691,17 @@ def draw_busy_comm_gantt(schedule: Dict[Hashable, List],
                             color='black', fontsize=font_size - 2, weight='bold'
                         )
         
-        # Set axis properties
-        if len(processors) < 10:
+        # Set axis properties - optimize for many processors
+        if len(processors) <= 20:
             axis.set_yticks(range(len(processors)))
             axis.set_yticklabels(processors)
+        else:
+            # For many processors, show only every nth label to avoid overcrowding
+            step = max(1, len(processors) // 10)
+            y_ticks = list(range(0, len(processors), step))
+            y_labels = [processors[i] for i in y_ticks]
+            axis.set_yticks(y_ticks)
+            axis.set_yticklabels(y_labels)
         axis.set_ylim(-0.5, len(processors) - 0.5)
         
         # Set x-axis limits
