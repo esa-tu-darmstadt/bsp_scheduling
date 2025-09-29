@@ -1,8 +1,9 @@
 """Fill-in/Split BSP Scheduler with three-phase placement strategy.
 
-This scheduler supports two priority modes:
+This scheduler supports three priority modes:
 - HEFT mode: Uses upward rank for task prioritization (default)
 - CPOP mode: Uses upward + downward rank for task prioritization
+- DS mode: Uses dominantsequence (static upward + dynamic downward rank)
 
 Implements a three-phase placement strategy in strict priority order:
 1. Fill-in: Try to place tasks in holes of existing supersteps
@@ -18,7 +19,7 @@ from .base import BSPScheduler
 from .. import draw_bsp_gantt
 from ..schedule import BSPSchedule, BSPHardware, Superstep
 import networkx as nx
-from .delaymodel.priorities import upward_rank, cpop_ranks
+from .delaymodel.priorities import upward_rank, cpop_ranks, calculate_dynamic_downward_rank
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,8 @@ class FillInSplitBSPScheduler(BSPScheduler):
         Args:
             verbose: Enable detailed output to console
             draw_after_each_step: Enable drawing Gantt chart after each scheduling step
-            priority_mode: Priority calculation mode - "heft" (upward rank only) or "cpop" (upward + downward rank)
+            priority_mode: Priority calculation mode - "heft" (upward rank only), "cpop" (upward + downward rank),
+                          or "ds" (dominantsequence: static upward + dynamic downward rank)
         """
         super().__init__()
         self.priority_mode = priority_mode.lower()
@@ -62,8 +64,8 @@ class FillInSplitBSPScheduler(BSPScheduler):
         self.verbose = verbose
         self.draw_after_each_step = draw_after_each_step
 
-        if self.priority_mode not in ["heft", "cpop"]:
-            raise ValueError(f"Invalid priority_mode: {priority_mode}. Must be 'heft' or 'cpop'")
+        if self.priority_mode not in ["heft", "cpop", "ds"]:
+            raise ValueError(f"Invalid priority_mode: {priority_mode}. Must be 'heft', 'cpop', or 'ds'")
 
         # Initialize statistics
         self._reset_stats()
@@ -103,19 +105,33 @@ class FillInSplitBSPScheduler(BSPScheduler):
         # Compute task priorities based on selected mode
         if self.priority_mode == "heft":
             rank = upward_rank(hardware.network, task_graph)
-        else:  # cpop mode
+        elif self.priority_mode == "cpop":
             rank = cpop_ranks(hardware.network, task_graph)
-        
-        # Initialize priority queue
+        elif self.priority_mode == "ds":
+            # For dominantsequence, we need static upward ranks + dynamic recalculation
+            static_upward_ranks = upward_rank(hardware.network, task_graph)
+            rank = {}  # Will be recalculated dynamically
+
+        # Initialize priority queue and ready tasks set
         queue = PriorityQueue()
-        
+        ready_tasks = set()
+
         # Add tasks with no dependencies to queue
         for task in task_graph.nodes:
             if task_graph.in_degree(task) == 0:
-                queue.put(PrioritizedTask(rank[task], task))
+                if self.priority_mode == "ds":
+                    # For DS mode, calculate initial priority
+                    dynamic_downward = calculate_dynamic_downward_rank(task, task_graph, schedule)
+                    task_priority = static_upward_ranks[task] + dynamic_downward
+                    rank[task] = task_priority
+                else:
+                    task_priority = rank[task]
+
+                queue.put(PrioritizedTask(task_priority, task))
+                ready_tasks.add(task)
+
                 if self.verbose:
-                    mode_str = "HEFT" if self.priority_mode == "heft" else "CPOP"
-                    self._log(f"Task {task} added to initial queue with {mode_str} rank {rank[task]}")
+                    self._log(f"Task {task} added to initial queue with {self.priority_mode} rank {task_priority}")
         
         # Create initial superstep if needed
         if not schedule.supersteps:
@@ -129,8 +145,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
             task_name = task_item.task
             
             if self.verbose:
-                mode_str = "HEFT" if self.priority_mode == "heft" else "CPOP"
-                self._log(f"\n#{task_num}: Processing task {task_name} with {mode_str} rank {rank[task_name]}")
+                self._log(f"\n#{task_num}: Processing task {task_name} with {self.priority_mode} rank {rank[task_name]}")
             
             # Try placement strategies in priority order
             placed = False
@@ -176,10 +191,32 @@ class FillInSplitBSPScheduler(BSPScheduler):
             # Add newly ready successors to queue
             for successor in task_graph.successors(task_name):
                 if all(schedule.task_scheduled(pred) for pred in task_graph.predecessors(successor)):
-                    queue.put(PrioritizedTask(rank[successor], successor))
-                    if self.verbose:
-                        mode_str = "HEFT" if self.priority_mode == "heft" else "CPOP"
-                        self._log(f"  Task {successor} became ready with {mode_str} rank {rank[successor]}")
+                    if successor not in ready_tasks:
+                        ready_tasks.add(successor)
+
+            # For DS mode, recalculate priorities for all ready tasks after placing a task
+            if self.priority_mode == "ds":
+                # Clear current queue and recalculate priorities
+                new_queue = PriorityQueue()
+                for ready_task in ready_tasks:
+                    if not schedule.task_scheduled(ready_task):
+                        dynamic_downward = calculate_dynamic_downward_rank(ready_task, task_graph, schedule)
+                        task_priority = static_upward_ranks[ready_task] + dynamic_downward
+                        rank[ready_task] = task_priority
+                        new_queue.put(PrioritizedTask(task_priority, ready_task))
+
+                        if self.verbose:
+                            self._log(f"  Task {ready_task} priority recalculated: DS rank {task_priority}")
+                queue = new_queue
+            else:
+                # For HEFT and CPOP modes, just add new ready tasks
+                for successor in task_graph.successors(task_name):
+                    if (all(schedule.task_scheduled(pred) for pred in task_graph.predecessors(successor)) and
+                        not schedule.task_scheduled(successor)):
+                        queue.put(PrioritizedTask(rank[successor], successor))
+                        if self.verbose:
+                            mode_str = {"heft": "HEFT", "cpop": "CPOP"}[self.priority_mode]
+                            self._log(f"  Task {successor} became ready with {mode_str} rank {rank[successor]}")
             
             # Optionally draw Gantt chart after each step
             if self.draw_after_each_step:
@@ -473,7 +510,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
     def print_stats(self):
         """Print scheduling statistics."""
         print("\n" + "="*50)
-        mode_str = "HEFT" if self.priority_mode == "heft" else "CPOP"
+        mode_str = {"heft": "HEFT", "cpop": "CPOP", "ds": "DominantSequence"}[self.priority_mode]
         print(f"Fill-in/Split BSP Scheduler Statistics ({mode_str} priority mode)")
         print("="*50)
         print(f"Tasks scheduled:         {self.stats['tasks_scheduled']}")
