@@ -12,11 +12,12 @@ import logging
 import pathlib
 import pickle
 import random
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Callable, Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 
 import networkx as nx
 import numpy as np
+from saga_bsp.misc.saga_scheduler_wrapper import preprocess_task_graph
 from saga_bsp.schedule import BSPHardware
 from saga_bsp.hardware import IPUHardware
 from saga_bsp.task_graphs import (
@@ -47,30 +48,37 @@ class DatasetMetadata:
     additional_info: Optional[Dict[str, Any]] = None
 
 def generate_wfcommons_dataset(cache_dir: pathlib.Path, recipe_name: str,
-                               task_count: Optional[int] = None,
+                               get_task_count: Optional[Callable[[int, List[int]], int]] = None,
                                tile_counts: List[int] = [4, 16, 32, 92],
-                               variations_per_tile: int = 3,
+                               get_variations_per_tile: Callable[[List[int]], int] = None,
                                overwrite_cache: bool = False) -> Tuple[List[DatasetItem], str]:
     """Generate datasets for WfCommons workflows.
 
     Args:
         cache_dir: Directory to store cached datasets
         recipe_name: WfCommons recipe name
-        task_count: Number of tasks (optional)
+        get_task_count: Function to determine task count of a variation given the iteration index and a list of task counts.
         tile_counts: List of tile counts to generate for
-        variations_per_tile: Number of variations per tile count
+        get_variations_per_tile: Function to determine number of variations per tile count (given tile_counts)
         overwrite_cache: Whether to overwrite existing cache
 
     Returns:
         Tuple of (dataset_items, dataset_display_name)
     """
+    
+    # Default: use all available task counts for the recipe
+    if get_task_count is None:
+        get_task_count = lambda idx, task_counts: task_counts[idx % len(tile_counts)]
+        
+    # Default: up to 5 iterations per tile count
+    if get_variations_per_tile is None:
+        get_variations_per_tile = lambda tile_counts: max(5, len(tile_counts))
+
     wf_generator = WfCommonsTaskGraphGenerator(cache_dir=cache_dir)
     dataset_display_name = recipe_name  # Use recipe name as display name
 
     # Create cache key
     cache_key = f"wfcommons_{recipe_name.replace('.', '_').replace('/', '_')}"
-    if task_count:
-        cache_key += f"_tasks_{task_count}"
 
     cache_path = cache_dir / f"{cache_key}_dataset.pkl"
 
@@ -87,6 +95,7 @@ def generate_wfcommons_dataset(cache_dir: pathlib.Path, recipe_name: str,
     logger.info(f"Generating WfCommons dataset for {recipe_name}...")
 
     dataset_items = []
+    variations_per_tile = get_variations_per_tile(tile_counts)
     total_variations = len(tile_counts) * variations_per_tile
     variation_count = 0
 
@@ -95,10 +104,13 @@ def generate_wfcommons_dataset(cache_dir: pathlib.Path, recipe_name: str,
             variation_count += 1
 
             try:
+                
                 # Set deterministic seed for reproducibility
                 seed = hash(f"wfcommons_{recipe_name}_{tile_count}_{variation_idx}") % (2**32)
                 random.seed(seed)
                 np.random.seed(seed)
+
+                task_count = get_task_count(variation_idx, wf_generator.TASK_COUNTS[recipe_name])
 
                 # Generate base task graph
                 task_graph, base_metadata = wf_generator.generate_task_graph(
@@ -277,17 +289,17 @@ def generate_spn_dataset(cache_dir: pathlib.Path, spn_filename: str,
 
 
 def generate_wfcommons_datasets(cache_dir: pathlib.Path,
-                               task_count: Optional[int] = None,
-                               tile_counts: List[int] = [4, 16, 32, 92],
-                               variations_per_tile: int = 3,
+                               get_task_count: Optional[Callable[[int], int]] = None,
+                               tile_counts: List[int] = [2, 4, 16, 32, 92],
+                               get_variations_per_tile: Callable[[List[int]], int] = None,
                                overwrite_cache: bool = False) -> Dict[str, Tuple[List[DatasetItem], str]]:
     """Generate datasets for all available WfCommons recipes.
 
     Args:
         cache_dir: Directory to store cached datasets
-        task_count: Number of tasks (optional)
+        get_task_count: Function to determine task count of a variation given min_tasks.
         tile_counts: List of tile counts to generate for
-        variations_per_tile: Number of variations per tile count
+        get_variations_per_tile: Function to determine number of variations per tile count (given tile_counts)
         overwrite_cache: Whether to overwrite existing cache
 
     Returns:
@@ -302,9 +314,9 @@ def generate_wfcommons_datasets(cache_dir: pathlib.Path,
             dataset_items, display_name = generate_wfcommons_dataset(
                 cache_dir=cache_dir,
                 recipe_name=recipe_name,
-                task_count=task_count,
+                get_task_count=get_task_count,
                 tile_counts=tile_counts,
-                variations_per_tile=variations_per_tile,
+                get_variations_per_tile=get_variations_per_tile,
                 overwrite_cache=overwrite_cache
             )
             datasets[f"wfcommons_{recipe_name}"] = (dataset_items, display_name)
@@ -317,7 +329,7 @@ def generate_wfcommons_datasets(cache_dir: pathlib.Path,
 
 def generate_spn_datasets(cache_dir: pathlib.Path,
                          spn_data_dir: Optional[pathlib.Path] = None,
-                         tile_counts: List[int] = [4, 16, 32, 92],
+                         tile_counts: List[int] = [2, 4, 16, 32, 92],
                          overwrite_cache: bool = False) -> Dict[str, Tuple[List[DatasetItem], str]]:
     """Generate datasets for all available SPN files.
 
@@ -360,8 +372,8 @@ def generate_spn_datasets(cache_dir: pathlib.Path,
 
 
 def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
-                               tile_counts: List[int] = [4, 16, 32, 92],
-                               variations_per_tile: int = 3,
+                               tile_counts: List[int] = [2, 4, 16, 32, 92],
+                               variations_per_tile: int = 5,
                                overwrite_cache: bool = False) -> Tuple[List[DatasetItem], str]:
     """Generate dataset for a primitive graph type using SAGA.
 
@@ -377,21 +389,24 @@ def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
     """
     # Hardcoded configurations for each graph type
     if graph_type == 'in_tree':
-        num_levels = 4
-        branching_factor = 3
+        num_levels = np.random.randint(3, 6)
+        branching_factor = np.random.randint(3, 6)
         config_str = f"{num_levels}_{branching_factor}"
     elif graph_type == 'out_tree':
-        num_levels = 4
-        branching_factor = 3
+        num_levels = np.random.randint(3, 6)
+        branching_factor = np.random.randint(3, 6)
         config_str = f"{num_levels}_{branching_factor}"
     elif graph_type == 'parallel_chains':
-        num_chains = 5
-        chain_length = 4
+        num_chains = np.random.randint(3, 6)
+        chain_length = np.random.randint(3, 6)
         config_str = f"{num_chains}_{chain_length}"
     else:
         raise ValueError(f"Unsupported graph type: {graph_type}")
 
-    dataset_display_name = f"{graph_type}_{config_str}"
+    get_task_weight = lambda task_id: np.random.uniform(1.0, 10.0)
+    get_dependency_weight = lambda src_id, dst_id: np.random.uniform(0.5, 5.0)
+
+    dataset_display_name = f"{graph_type}"
 
     # Create cache key
     cache_key = f"primitives_{graph_type}_{config_str}"
@@ -425,13 +440,14 @@ def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
 
                 # Generate primitive graph using SAGA
                 if graph_type == 'in_tree':
-                    task_graphs = gen_in_trees(1, num_levels, branching_factor)
+                    task_graphs = gen_in_trees(1, num_levels, branching_factor, get_task_weight, get_dependency_weight)
                 elif graph_type == 'out_tree':
-                    task_graphs = gen_out_trees(1, num_levels, branching_factor)
+                    task_graphs = gen_out_trees(1, num_levels, branching_factor, get_task_weight, get_dependency_weight)
                 elif graph_type == 'parallel_chains':
-                    task_graphs = gen_parallel_chains(1, num_chains, chain_length)
+                    task_graphs = gen_parallel_chains(1, num_chains, chain_length, get_task_weight, get_dependency_weight)
 
                 task_graph = task_graphs[0]
+                task_graph, _ = preprocess_task_graph(task_graph)
 
                 bsp_hardware = IPUHardware(num_tiles=tile_count, sync_time=0)
 
