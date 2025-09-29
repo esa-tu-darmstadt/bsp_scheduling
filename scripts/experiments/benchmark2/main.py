@@ -25,7 +25,7 @@ from dataset_generator import (
 )
 from schedulers import get_bsp_schedulers
 from benchmark_runner import BenchmarkRunner
-from visualizations import BoxPlotVisualizer, HeatmapVisualizer
+from visualizations import BoxPlotVisualizer, HeatmapVisualizer, ScheduleComparisonVisualizer
 from solver_statistics import write_solver_statistics
 
 thisdir = pathlib.Path(__file__).parent.resolve()
@@ -54,6 +54,12 @@ def main():
     parser.add_argument('--max-instances', type=int, default=5,
                        help='Maximum instances per dataset for benchmarking (default: 5, 0 = no limit)')
     parser.add_argument('--verbose', action='store_true', help='Enable debug logging')
+
+    # Schedule comparison options
+    parser.add_argument('--schedule-comparison-dataset', type=str, default=None,
+                       help='Specific dataset for schedule comparison (default: all)')
+    parser.add_argument('--schedule-comparison-task', type=int, default=-1,
+                       help='Task instance index for schedule comparison (default: disable)')
     
     parser.add_argument('--clean-datasets', action='store_true',
                        help='Clean up existing datasets')
@@ -110,7 +116,8 @@ def main():
         logger.info("Generating WfCommons datasets...")
         wfcommons_datasets = generate_wfcommons_datasets(
             cache_dir=args.datadir,
-            task_count=50,  # Fixed task count for consistency
+            get_task_count=lambda idx, task_counts: task_counts[idx % len(task_counts)],
+            get_variations_per_tile=lambda tile_counts: max(5, len(tile_counts)),
             overwrite_cache=args.overwrite
         )
         logger.info(f"Generated {len(wfcommons_datasets)} WfCommons datasets")
@@ -161,6 +168,16 @@ def main():
         resultsdir=args.resultsdir,
         outputdir=args.visdir / "heatmaps"
     )
+
+    if args.schedule_comparison_task >= 0:
+        # Schedule comparison visualization
+        schedule_comparison_visualizer = ScheduleComparisonVisualizer()
+        schedule_comparison_visualizer.generate_schedule_comparisons(
+            schedules_dir=schedules_viz_dir,
+            outputdir=args.visdir / "schedule_comparisons",
+            dataset_name=args.schedule_comparison_dataset,
+            task_idx=args.schedule_comparison_task
+        )
 
     # Step 4: Write solver statistics
     stats_out = args.resultsdir / "solver_statistics.txt"
