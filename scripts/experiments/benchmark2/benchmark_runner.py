@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Any
 import pandas as pd
 from joblib import Parallel, delayed
 
-from dataset_generator import DatasetGenerator, DatasetItem, load_dataset, find_datasets, parse_dataset_for_experiments
+from dataset_generator import DatasetItem, load_dataset, find_datasets
 from schedule_visualizer import save_schedule_visualization, should_save_visualization
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,8 @@ def run_single_scheduler_task(scheduler_name, scheduler, dataset_item, task_grap
             'target_ccr': dataset_item.metadata.get('target_ccr'),
             'actual_ccr': dataset_item.metadata.get('actual_ccr'),
             'sync_time': dataset_item.metadata.get('sync_time'),
-            'num_tiles': dataset_item.metadata.get('num_tiles')
+            'num_tiles': dataset_item.metadata.get('num_tiles'),
+            'source_type': dataset_item.metadata.get('source_type')
         }
 
     except Exception as e:
@@ -133,7 +134,8 @@ class BenchmarkRunner:
                     'target_ccr': result.get('target_ccr'),
                     'actual_ccr': result.get('actual_ccr'),
                     'sync_time': result.get('sync_time'),
-                    'num_tiles': result.get('num_tiles')
+                    'num_tiles': result.get('num_tiles'),
+                    'source_type': result.get('source_type')
                 })
 
         # Convert results to DataFrame
