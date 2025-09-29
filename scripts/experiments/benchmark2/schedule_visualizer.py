@@ -9,6 +9,7 @@ import logging
 import pathlib
 from typing import Dict, Any, Optional
 import matplotlib.pyplot as plt
+import pickle
 
 # Import visualization functions from saga_bsp
 from saga_bsp.utils.visualization import draw_bsp_gantt, draw_busy_comm_gantt
@@ -77,7 +78,46 @@ def save_schedule_visualization(schedule_result: Dict[str, Any],
         plt.savefig(filepath, dpi=150, bbox_inches='tight')
         plt.close()
 
+        # Also save the schedule data for comparison visualization
+        # Place PKL file in the same folder as the PNG
+        schedule_data_filename = f"{dataset_name}_{scheduler_name}_task{task_graph_idx}.pkl"
+        schedule_data_filepath = folder / schedule_data_filename
+
+        # Prepare schedule data with type information
+        if isinstance(schedule, BSPSchedule):
+            schedule_data = {
+                'schedule': schedule,
+                'schedule_type': 'bsp',
+                'scheduler_name': scheduler_name,
+                'dataset_name': dataset_name,
+                'task_graph_idx': task_graph_idx,
+                'makespan': schedule_result.get('makespan', schedule.makespan)
+            }
+        elif isinstance(schedule, dict):
+            schedule_data = {
+                'schedule': schedule,
+                'schedule_type': 'busy_comm',
+                'scheduler_name': scheduler_name,
+                'dataset_name': dataset_name,
+                'task_graph_idx': task_graph_idx,
+                'makespan': schedule_result.get('makespan', max(task.end for tasks in schedule.values() for task in tasks) if schedule else 0)
+            }
+        else:
+            schedule_data = {
+                'schedule': schedule,
+                'schedule_type': 'unknown',
+                'scheduler_name': scheduler_name,
+                'dataset_name': dataset_name,
+                'task_graph_idx': task_graph_idx,
+                'makespan': schedule_result.get('makespan', 0)
+            }
+
+        # Save schedule data
+        with open(schedule_data_filepath, 'wb') as f:
+            pickle.dump(schedule_data, f)
+
         logger.info(f"Saved schedule visualization to {filepath}")
+        logger.debug(f"Saved schedule data to {schedule_data_filepath}")
 
     except Exception as e:
         logger.error(f"Failed to save schedule visualization for {scheduler_name}: {e}")
