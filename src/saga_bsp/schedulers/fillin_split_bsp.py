@@ -17,7 +17,7 @@ import logging
 from queue import PriorityQueue
 from .base import BSPScheduler
 from .. import draw_bsp_gantt
-from ..schedule import BSPSchedule, BSPHardware, Superstep
+from ..schedule import BSPSchedule, BSPHardware, Superstep, BSPTask
 import networkx as nx
 from .delaymodel.priorities import upward_rank, cpop_ranks, calculate_dynamic_downward_rank
 
@@ -49,7 +49,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
     """
     
     def __init__(self, verbose: bool = False, draw_after_each_step: bool = False,
-                 priority_mode: str = "heft"):
+                 priority_mode: str = "heft", optimize_merging: bool = False):
         """Initialize the Fill-in/Split BSP scheduler.
 
         Args:
@@ -57,12 +57,15 @@ class FillInSplitBSPScheduler(BSPScheduler):
             draw_after_each_step: Enable drawing Gantt chart after each scheduling step
             priority_mode: Priority calculation mode - "heft" (upward rank only), "cpop" (upward + downward rank),
                           or "ds" (dominantsequence: static upward + dynamic downward rank)
+            optimize_merging: Enable second phase optimization that iteratively merges adjacent supersteps
+                            for maximum makespan reduction
         """
         super().__init__()
         self.priority_mode = priority_mode.lower()
         self.name = "FillInSplit+" + self.priority_mode.capitalize()
         self.verbose = verbose
         self.draw_after_each_step = draw_after_each_step
+        self.optimize_merging = optimize_merging
 
         if self.priority_mode not in ["heft", "cpop", "ds"]:
             raise ValueError(f"Invalid priority_mode: {priority_mode}. Must be 'heft', 'cpop', or 'ds'")
@@ -84,7 +87,9 @@ class FillInSplitBSPScheduler(BSPScheduler):
             'split_placements': 0,
             'supersteps_created': 0,
             'supersteps_split': 0,
-            'supersteps_merged': 0
+            'supersteps_merged': 0,
+            'optimization_merges': 0,
+            'optimization_iterations': 0
         }
     
     def schedule(self, hardware: BSPHardware, task_graph: nx.DiGraph) -> BSPSchedule:
@@ -228,7 +233,14 @@ class FillInSplitBSPScheduler(BSPScheduler):
         self.stats['supersteps_merged'] = merges
         if self.verbose and merges > 0:
             self._log(f"\nMerged {merges} superstep(s) to reduce synchronization overhead")
-        
+
+        # Second phase: Optimize by iteratively eliminating supersteps for maximum makespan reduction
+        if self.optimize_merging:
+            optimization_eliminations = self._optimize_superstep_elimination(schedule)
+            self.stats['optimization_merges'] = optimization_eliminations
+            if self.verbose and optimization_eliminations > 0:
+                self._log(f"Optimization phase: eliminated {optimization_eliminations} superstep(s) to reduce makespan")
+
         # Validate the final schedule
         schedule.assert_valid()
         return schedule
@@ -506,7 +518,230 @@ class FillInSplitBSPScheduler(BSPScheduler):
             ready_time = max(ready_time, pred_instance.end)
         
         return ready_time
-    
+
+    def _calculate_elimination_benefit(self, schedule: BSPSchedule, superstep_idx: int) -> float:
+        """Calculate the makespan reduction from eliminating a superstep.
+
+        Args:
+            schedule: Current BSP schedule
+            superstep_idx: Index of the superstep to eliminate
+
+        Returns:
+            Makespan reduction (positive value means beneficial elimination, 0 or negative means no benefit)
+        """
+        # Don't eliminate first or last superstep
+        if superstep_idx <= 0 or superstep_idx >= len(schedule.supersteps) - 1:
+            return 0.0
+
+        # Get current makespan
+        original_makespan = schedule.makespan
+
+        # Create a copy of the schedule to test the elimination
+        test_schedule = schedule.copy()
+
+        try:
+            # Eliminate the superstep and repair dependencies
+            self._eliminate_and_repair_superstep(test_schedule, superstep_idx)
+
+            # Calculate new makespan
+            new_makespan = test_schedule.makespan
+
+            # Return the benefit (reduction in makespan)
+            return original_makespan - new_makespan
+
+        except Exception:
+            # If elimination fails for any reason, return no benefit
+            return 0.0
+
+    def _eliminate_and_repair_superstep(self, schedule: BSPSchedule, superstep_idx: int):
+        """Eliminate a superstep and repair all subsequent supersteps by duplicating tasks as needed.
+
+        Args:
+            schedule: BSP schedule to modify
+            superstep_idx: Index of the superstep to eliminate
+        """
+        if superstep_idx <= 0 or superstep_idx >= len(schedule.supersteps):
+            raise ValueError(f"Cannot eliminate superstep {superstep_idx}")
+
+        # Remove the target superstep and update task mappings
+        eliminated_superstep = schedule.supersteps[superstep_idx]
+
+        # Remove tasks from task mapping
+        for processor, tasks in eliminated_superstep.tasks.items():
+            for task in tasks:
+                if task in schedule.task_mapping[task.node]:
+                    schedule.task_mapping[task.node].remove(task)
+
+        # Remove the superstep from the schedule
+        schedule.supersteps.pop(superstep_idx)
+
+        # Invalidate cached indices for all following supersteps
+        for i in range(superstep_idx, len(schedule.supersteps)):
+            if 'index' in schedule.supersteps[i].__dict__:
+                del schedule.supersteps[i].__dict__['index']
+
+        # Repair all subsequent supersteps (indices have shifted down after removal)
+        for superstep in schedule.supersteps[superstep_idx:]:
+            self._repair_superstep_dependencies(schedule, superstep)
+
+    def _repair_superstep_dependencies(self, schedule: BSPSchedule, superstep: Superstep):
+        """Repair dependencies in a superstep by duplicating missing predecessors.
+
+        Args:
+            schedule: BSP schedule being modified
+            superstep: Superstep to repair
+        """
+        # Repair each processor's tasks
+        for processor in list(superstep.tasks.keys()):
+            task_list = superstep.tasks[processor]
+
+            # Repair each task in the processor (iterate by index since list may grow)
+            task_idx = 0
+            while task_idx < len(task_list):
+                task = task_list[task_idx]
+                self._ensure_task_dependencies(schedule, task, superstep, processor, task_idx)
+                task_idx += 1
+
+    def _ensure_task_dependencies(self, schedule: BSPSchedule, task: BSPTask,
+                                 superstep: Superstep, processor: str, task_position: int):
+        """Ensure all dependencies of a task are available by duplicating missing predecessors.
+
+        Args:
+            schedule: BSP schedule being modified
+            task: Task whose dependencies to check
+            superstep: Superstep containing the task
+            processor: Processor running the task
+            task_position: Position of the task in processor's task list
+        """
+        for pred_name in schedule.task_graph.predecessors(task.node):
+            if not self._predecessor_available(schedule, pred_name, task, superstep, processor, task_position):
+                # Recursively duplicate the missing predecessor
+                self._duplicate_task_recursively(schedule, pred_name, superstep, processor, task_position)
+
+    def _predecessor_available(self, schedule: BSPSchedule, pred_name: str, task: Optional[BSPTask],
+                              current_superstep: Superstep, processor: str, task_position: int) -> bool:
+        """Check if a predecessor is available for a task.
+
+        A predecessor is available if:
+        1. It's in the same superstep on same processor before this task, OR
+        2. It's in any earlier superstep
+
+        Args:
+            schedule: BSP schedule
+            pred_name: Name of the predecessor task
+            task: Task that needs the predecessor
+            current_superstep: Superstep containing the task
+            processor: Processor running the task
+            task_position: Position of the task in processor's task list
+
+        Returns:
+            True if predecessor is available, False otherwise
+        """
+        # Check 1: Same superstep, same processor, executed before this task
+        for i, task_instance in enumerate(current_superstep.tasks[processor]):
+            if task_instance.node == pred_name and i < task_position:
+                return True
+
+        # Check 2: Any earlier superstep
+        for earlier_superstep in schedule.supersteps[:current_superstep.index]:
+            for proc_tasks in earlier_superstep.tasks.values():
+                for task_instance in proc_tasks:
+                    if task_instance.node == pred_name:
+                        return True
+
+        return False
+
+    def _duplicate_task_recursively(self, schedule: BSPSchedule, task_name: str,
+                                   target_superstep: Superstep, target_processor: str,
+                                   before_position: int):
+        """Recursively duplicate a task and all its missing dependencies.
+
+        Args:
+            schedule: BSP schedule being modified
+            task_name: Name of the task to duplicate
+            target_superstep: Superstep to duplicate into
+            target_processor: Processor to duplicate onto
+            before_position: Position to insert the task (and its dependencies)
+        """
+        # First, recursively ensure all predecessors of this task are available
+        insertion_position = before_position
+
+        for pred_name in schedule.task_graph.predecessors(task_name):
+            if not self._predecessor_available(schedule, pred_name, None, target_superstep,
+                                             target_processor, insertion_position):
+                # Recursively duplicate the predecessor
+                self._duplicate_task_recursively(schedule, pred_name, target_superstep,
+                                               target_processor, insertion_position)
+                insertion_position += 1  # Adjust position as we insert dependencies
+
+        # Now duplicate this task at the correct position
+        schedule.schedule(task_name, target_processor, target_superstep, insertion_position)
+
+    def _optimize_superstep_elimination(self, schedule: BSPSchedule) -> int:
+        """Optimize schedule by iteratively eliminating supersteps for maximum makespan reduction.
+
+        This method implements the elimination-based optimization that:
+        1. Runs in a while loop until no beneficial eliminations are found
+        2. In each iteration, finds the superstep with highest makespan reduction when eliminated
+        3. Performs that elimination if it provides any benefit
+        4. Continues until no more beneficial eliminations are possible
+
+        Args:
+            schedule: BSP schedule to optimize
+
+        Returns:
+            Total number of supersteps eliminated
+        """
+        total_eliminations = 0
+        iteration = 0
+
+        if self.verbose:
+            initial_makespan = schedule.makespan
+            initial_supersteps = len(schedule.supersteps)
+            self._log(f"\nStarting elimination-based optimization phase:")
+            self._log(f"  Initial makespan: {initial_makespan:.2f}")
+            self._log(f"  Initial supersteps: {initial_supersteps}")
+
+        while True:
+            iteration += 1
+            best_benefit = 0.0
+            best_superstep_to_eliminate = None
+
+            # Evaluate eliminating each superstep (except first and last)
+            for i in range(1, len(schedule.supersteps) - 1):
+                benefit = self._calculate_elimination_benefit(schedule, i)
+                if benefit > best_benefit:
+                    best_benefit = benefit
+                    best_superstep_to_eliminate = i
+
+            # If no beneficial elimination found, stop optimization
+            if best_superstep_to_eliminate is None or best_benefit <= 0:
+                if self.verbose:
+                    self._log(f"  Iteration {iteration}: No beneficial eliminations found, stopping optimization")
+                break
+
+            # Perform the best elimination
+            if self.verbose:
+                self._log(f"  Iteration {iteration}: Eliminating superstep {best_superstep_to_eliminate} "
+                         f"(benefit: {best_benefit:.2f})")
+
+            self._eliminate_and_repair_superstep(schedule, best_superstep_to_eliminate)
+            total_eliminations += 1
+
+        self.stats['optimization_iterations'] = iteration - 1
+
+        if self.verbose and total_eliminations > 0:
+            final_makespan = schedule.makespan
+            final_supersteps = len(schedule.supersteps)
+            total_reduction = initial_makespan - final_makespan
+            self._log(f"  Optimization complete:")
+            self._log(f"    Final makespan: {final_makespan:.2f}")
+            self._log(f"    Final supersteps: {final_supersteps}")
+            self._log(f"    Total makespan reduction: {total_reduction:.2f}")
+            self._log(f"    Total supersteps eliminated: {total_eliminations}")
+
+        return total_eliminations
+
     def print_stats(self):
         """Print scheduling statistics."""
         print("\n" + "="*50)
@@ -522,4 +757,8 @@ class FillInSplitBSPScheduler(BSPScheduler):
         print(f"  - Created:            {self.stats['supersteps_created']}")
         print(f"  - Split:              {self.stats['supersteps_split']}")
         print(f"  - Merged:             {self.stats['supersteps_merged']}")
+        if self.optimize_merging:
+            print(f"Optimization phase:")
+            print(f"  - Iterations:         {self.stats['optimization_iterations']}")
+            print(f"  - Eliminations:       {self.stats['optimization_merges']}")
         print("="*50)
