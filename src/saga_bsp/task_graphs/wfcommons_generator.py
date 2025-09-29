@@ -2,6 +2,7 @@
 WfCommons-based task graph generation.
 """
 
+import json
 import logging
 import random
 from typing import Tuple, Optional, List
@@ -35,19 +36,18 @@ class WfCommonsTaskGraphGenerator(TaskGraphGenerator):
         'soykb': SoykbRecipe,
         'srasearch': SrasearchRecipe,
     }
-
-    # Task count distributions for each recipe (min, max, default)
-    TASK_COUNT_RANGES = {
-        'blast': (50, 500, 200),
-        'bwa': (150, 400, 250),
-        'cycles': (100, 500, 200),
-        'epigenomics': (100, 400, 200),
-        'genome': (100, 400, 200),
-        'montage': (100, 400, 200),
-        'seismology': (100, 400, 200),
-        'soykb': (100, 400, 200),
-        'srasearch': (100, 400, 200),
-    }
+    
+    def __init__(self, cache_dir: Optional[str] = None):
+        super().__init__(cache_dir=cache_dir)
+        # Get min task counts for each recipe
+        self.TASK_COUNTS = {}
+        for name, recipe_cls in self.RECIPES.items():
+            recipe = recipe_cls()
+            microstructures_dir = recipe.this_dir / 'microstructures'
+            summary = json.loads((microstructures_dir / 'summary.json').read_text())
+            base_graphs = summary['base_graphs']
+            base_graph_orders = [base_graphs[g]['order'] for g in base_graphs]
+            self.TASK_COUNTS[name] = list(set(base_graph_orders))
 
     def generate_task_graph(self, recipe_name: str, task_count: Optional[int] = None) -> Tuple[nx.DiGraph, TaskGraphMetadata]:
         """Generate a single task graph using specified WfCommons recipe.
