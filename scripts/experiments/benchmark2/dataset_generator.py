@@ -17,6 +17,8 @@ from dataclasses import dataclass
 
 import networkx as nx
 import numpy as np
+from rich.console import Console
+from rich.progress import track
 from saga_bsp.misc.saga_scheduler_wrapper import preprocess_task_graph
 from saga_bsp.schedule import BSPHardware
 from saga_bsp.hardware import IPUHardware
@@ -96,15 +98,13 @@ def generate_wfcommons_dataset(cache_dir: pathlib.Path, recipe_name: str,
 
     dataset_items = []
     variations_per_tile = get_variations_per_tile(tile_counts)
-    total_variations = len(tile_counts) * variations_per_tile
     variation_count = 0
 
-    for tile_count in tile_counts:
+    for tile_count in track(tile_counts, description=f"[green]Generating {recipe_name}"):
         for variation_idx in range(variations_per_tile):
             variation_count += 1
 
             try:
-                
                 # Set deterministic seed for reproducibility
                 seed = hash(f"wfcommons_{recipe_name}_{tile_count}_{variation_idx}") % (2**32)
                 random.seed(seed)
@@ -146,9 +146,6 @@ def generate_wfcommons_dataset(cache_dir: pathlib.Path, recipe_name: str,
                 }
 
                 dataset_items.append(DatasetItem(task_graph=task_graph, hardware=bsp_hardware, metadata=metadata))
-
-                if variation_count % 5 == 0:
-                    logger.info(f"Generated {variation_count}/{total_variations} WfCommons variations")
 
             except Exception as e:
                 logger.warning(f"Failed to generate WfCommons variation {variation_count}: {e}")
@@ -222,7 +219,7 @@ def generate_spn_dataset(cache_dir: pathlib.Path, spn_filename: str,
     dataset_items = []
     variation_count = 0
 
-    for tile_count in tile_counts:
+    for tile_count in track(tile_counts, description=f"[blue]Generating SPN {dataset_display_name}"):
         variation_count += 1
 
         try:
@@ -259,9 +256,6 @@ def generate_spn_dataset(cache_dir: pathlib.Path, spn_filename: str,
 
             dataset_items.append(DatasetItem(task_graph=task_graph, hardware=bsp_hardware, metadata=metadata))
 
-            if variation_count % 5 == 0:
-                logger.info(f"Generated {variation_count}/{len(tile_counts)} SPN variations")
-
         except Exception as e:
             logger.warning(f"Failed to generate SPN variation {variation_count}: {e}")
             continue
@@ -292,7 +286,8 @@ def generate_wfcommons_datasets(cache_dir: pathlib.Path,
                                get_task_count: Optional[Callable[[int], int]] = None,
                                tile_counts: List[int] = [2, 4, 16, 32, 92],
                                get_variations_per_tile: Callable[[List[int]], int] = None,
-                               overwrite_cache: bool = False) -> Dict[str, Tuple[List[DatasetItem], str]]:
+                               overwrite_cache: bool = False,
+                               console: Console = None) -> Dict[str, Tuple[List[DatasetItem], str]]:
     """Generate datasets for all available WfCommons recipes.
 
     Args:
@@ -425,10 +420,9 @@ def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
     logger.info(f"Generating primitives dataset for {graph_type} with config {config_str}...")
 
     dataset_items = []
-    total_variations = len(tile_counts) * variations_per_tile
     variation_count = 0
 
-    for tile_count in tile_counts:
+    for tile_count in track(tile_counts, description=f"[yellow]Generating {graph_type} primitives"):
         for variation_idx in range(variations_per_tile):
             variation_count += 1
 
@@ -483,9 +477,6 @@ def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
                 }
 
                 dataset_items.append(DatasetItem(task_graph=task_graph, hardware=bsp_hardware, metadata=metadata))
-
-                if variation_count % 5 == 0:
-                    logger.info(f"Generated {variation_count}/{total_variations} {graph_type} variations")
 
             except Exception as e:
                 logger.warning(f"Failed to generate {graph_type} variation {variation_count}: {e}")

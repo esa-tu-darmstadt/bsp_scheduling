@@ -20,6 +20,9 @@ import argparse
 import shutil
 from typing import List, Optional
 
+from rich.console import Console
+from rich.logging import RichHandler
+
 from dataset_generator import (
     generate_wfcommons_datasets, generate_spn_datasets, generate_primitives_datasets
 )
@@ -70,22 +73,32 @@ def main():
 
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    # Setup Rich logging for consistent console output
+    console = Console()
+
+    # Configure root logger to catch ALL logging with Rich
+    root_logger = logging.getLogger()
+
+    # Remove existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Add Rich handler to root logger
+    rich_handler = RichHandler(console=console, show_time=True, show_path=False)
+    rich_handler.setFormatter(logging.Formatter("%(message)s"))
+    root_logger.addHandler(rich_handler)
+    root_logger.setLevel(logging.INFO)
+
     logger = logging.getLogger(__name__)
-    
+
     if args.clean_datasets:
         args.clean_results = True
-        
+
     if args.clean_results:
         args.clean_visualizations = True
-    
+
     if args.verbose:
-        logger.setLevel(logging.DEBUG)
-        logging.getLogger('dataset_generator').setLevel(logging.DEBUG)
-        logging.getLogger('benchmark_runner').setLevel(logging.DEBUG)
-        logging.getLogger('schedulers').setLevel(logging.DEBUG)
-        logging.getLogger('visualizations').setLevel(logging.DEBUG)
-        logging.getLogger('solver_statistics').setLevel(logging.DEBUG)
+        root_logger.setLevel(logging.DEBUG)
 
     # Create directories
     args.datadir.mkdir(parents=True, exist_ok=True)
@@ -106,7 +119,7 @@ def main():
 
     # Initialize components
     schedulers = get_bsp_schedulers(scheduler_names=args.schedulers)
-    runner = BenchmarkRunner(schedulers=schedulers)
+    runner = BenchmarkRunner(schedulers=schedulers, console=console)
 
     # Step 1: Generate datasets
     if not args.skip_generation:
@@ -118,7 +131,8 @@ def main():
             cache_dir=args.datadir,
             get_task_count=lambda idx, task_counts: task_counts[idx % len(task_counts)],
             get_variations_per_tile=lambda tile_counts: max(5, len(tile_counts)),
-            overwrite_cache=args.overwrite
+            overwrite_cache=args.overwrite,
+            console=console
         )
         logger.info(f"Generated {len(wfcommons_datasets)} WfCommons datasets")
 

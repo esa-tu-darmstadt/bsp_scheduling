@@ -7,10 +7,11 @@ managing results storage and providing progress tracking.
 
 import logging
 import pathlib
-import pickle
 from typing import Dict, List, Optional, Any
 import pandas as pd
-from joblib import Parallel, delayed
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, BarColumn, TextColumn
+from rich.console import Console
 
 from dataset_generator import DatasetItem, load_dataset, find_datasets
 from schedule_visualizer import save_schedule_visualization, should_save_visualization
@@ -59,17 +60,114 @@ def run_single_scheduler_task(scheduler_name, scheduler, dataset_item, task_grap
 class BenchmarkRunner:
     """Runner for BSP scheduling benchmarks."""
 
-    def __init__(self, schedulers: Dict[str, Any]):
+    def __init__(self, schedulers: Dict[str, Any], console: Console = None):
         """Initialize benchmark runner.
 
         Args:
             schedulers: Dictionary of scheduler instances
+            console: Rich console instance to use (optional, creates new if None)
         """
         self.schedulers = schedulers
+        self.console = console if console is not None else Console()
+
+    def _run_tasks_with_progress(self, tasks: List, num_jobs: int, dataset_name: str = "Unknown", progress_context=None) -> List:
+        """Run tasks with Rich progress tracking."""
+        # Group tasks by scheduler for better progress visualization
+        scheduler_tasks = {}
+        for task in tasks:
+            scheduler_name = task[0]
+            if scheduler_name not in scheduler_tasks:
+                scheduler_tasks[scheduler_name] = []
+            scheduler_tasks[scheduler_name].append(task)
+
+        total_tasks = len(tasks)
+        results = []
+
+        # Use existing progress context or create new one
+        if progress_context is not None:
+            progress = progress_context
+            should_close_progress = False
+        else:
+            # Clear console to prevent artifacts only when creating new progress context
+            self.console.clear()
+            progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]{task.description}", justify="left"),
+                BarColumn(bar_width=None),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TextColumn("({task.completed}/{task.total})"),
+                TimeElapsedColumn(),
+                console=self.console,
+                transient=False,
+                refresh_per_second=4,  # Slower refresh to work better with logging
+                expand=True,  # Allow logging messages to appear above progress bars
+                get_time=lambda: __import__('time').time()
+            )
+            progress.start()
+            should_close_progress = True
+
+        # Create overall progress task with dataset info
+        overall_task = progress.add_task(
+            f"Dataset: {dataset_name} - Overall Progress",
+            total=total_tasks
+        )
+
+        # Create progress tasks for each scheduler
+        scheduler_progress_tasks = {}
+        for scheduler_name, scheduler_task_list in scheduler_tasks.items():
+            task_id = progress.add_task(
+                f"{scheduler_name}",
+                total=len(scheduler_task_list)
+            )
+            scheduler_progress_tasks[scheduler_name] = task_id
+
+        if num_jobs == 1:
+            # Sequential execution for easier debugging
+            for task in tasks:
+                scheduler_name = task[0]
+                try:
+                    result = run_single_scheduler_task(*task)
+                    results.append(result)
+                except Exception as e:
+                    logger.warning(f"Task failed: {e}")
+                    results.append(None)
+
+                progress.advance(scheduler_progress_tasks[scheduler_name])
+                progress.advance(overall_task)
+        else:
+            # Parallel execution using ProcessPoolExecutor
+            with ProcessPoolExecutor(max_workers=num_jobs) as executor:
+                # Submit all tasks
+                future_to_task = {
+                    executor.submit(run_single_scheduler_task, *task): task
+                    for task in tasks
+                }
+
+                # Process completed tasks
+                for future in as_completed(future_to_task):
+                    task = future_to_task[future]
+                    scheduler_name = task[0]
+
+                    try:
+                        result = future.result()
+                        results.append(result)
+                    except Exception as e:
+                        logger.warning(f"Task failed: {e}")
+                        results.append(None)
+
+                    progress.advance(scheduler_progress_tasks[scheduler_name])
+                    progress.advance(overall_task)
+
+        # Close progress context if we created it
+        if should_close_progress:
+            progress.stop()
+
+        return results
 
     def run_dataset_benchmark(self, dataset_name: str, dataset_items: List[DatasetItem],
                              resultsdir: pathlib.Path, num_jobs: int = 1, overwrite: bool = False,
-                             max_instances: int = 5, visualization_dir: Optional[pathlib.Path] = None) -> None:
+                             max_instances: int = 5, visualization_dir: Optional[pathlib.Path] = None,
+                             progress_context=None) -> None:
         """Run benchmark on a specific dataset.
 
         Args:
@@ -83,15 +181,15 @@ class BenchmarkRunner:
         """
         savepath = resultsdir / f"{dataset_name}.csv"
         if savepath.exists() and not overwrite:
-            logger.info(f"Results for {dataset_name} already exist. Skipping.")
+            logger.debug(f"Results for {dataset_name} already exist. Skipping.")
             return
 
         # Limit number of dataset items for benchmarking
         if max_instances > 0 and len(dataset_items) > max_instances:
             dataset_items = dataset_items[:max_instances]
-            logger.info(f"Limited to {max_instances} instances for {dataset_name}")
+            logger.debug(f"Limited to {max_instances} instances for {dataset_name}")
 
-        logger.info(f"Running benchmark on {dataset_name} with {len(dataset_items)} dataset items")
+        logger.debug(f"Running benchmark on {dataset_name} with {len(dataset_items)} dataset items")
 
         # Create all scheduler-dataset_item combinations for parallel execution
         tasks = []
@@ -99,14 +197,10 @@ class BenchmarkRunner:
             for scheduler_name, scheduler in self.schedulers.items():
                 tasks.append((scheduler_name, scheduler, dataset_item, i, dataset_name, visualization_dir))
 
-        logger.info(f"Running {len(tasks)} scheduler-task combinations in parallel with {num_jobs} jobs")
+        logger.debug(f"Running {len(tasks)} scheduler-task combinations in parallel with {num_jobs} jobs")
 
-        # Execute all combinations in parallel
-        parallel_results = Parallel(n_jobs=num_jobs, verbose=1)(
-            delayed(run_single_scheduler_task)(
-                scheduler_name, scheduler, dataset_item, task_graph_idx, dataset_name, visualization_dir
-            ) for scheduler_name, scheduler, dataset_item, task_graph_idx, dataset_name, visualization_dir in tasks
-        )
+        # Execute all combinations in parallel with Rich progress tracking
+        parallel_results = self._run_tasks_with_progress(tasks, num_jobs, dataset_name, progress_context)
 
         # Filter out None results (failed executions)
         valid_results = [r for r in parallel_results if r is not None]
@@ -192,32 +286,69 @@ class BenchmarkRunner:
 
         logger.info(f"Running benchmarks on {len(available_datasets)} datasets: {[name for name, _ in available_datasets]}")
 
-        # Run benchmarks for each dataset
-        for dataset_key, dataset_file in available_datasets:
-            try:
-                # Load dataset
-                dataset_items, dataset_metadata = load_dataset(dataset_file)
+        # Clear console before starting
+        self.console.clear()
+        self.console.print(f"[bold green]🚀 Starting benchmark on {len(available_datasets)} datasets")
+        self.console.print(f"[cyan]Datasets: {[name for name, _ in available_datasets]}")
+        self.console.print()
 
-                if not dataset_items:
-                    logger.warning(f"No items in dataset {dataset_key}, skipping")
-                    continue
+        # Run benchmarks for each dataset with overall progress tracking
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold cyan]{task.description}", justify="left"),
+            BarColumn(bar_width=None),  # Auto-size bar to fit console
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("({task.completed}/{task.total})"),
+            TimeElapsedColumn(),
+            console=self.console,
+            transient=False,
+            refresh_per_second=4,  # Slower refresh to work better with logging
+            expand=True  # Allow logging messages to appear above progress bars
+        ) as progress:
 
-                # Use display name from metadata if available, fallback to dataset_key
-                display_name = getattr(dataset_metadata, 'dataset_name', dataset_key)
+            dataset_progress = progress.add_task(
+                f"Processing Datasets",
+                total=len(available_datasets)
+            )
 
-                # Run benchmark
-                self.run_dataset_benchmark(
-                    dataset_name=display_name,
-                    dataset_items=dataset_items,
-                    resultsdir=resultsdir,
-                    num_jobs=num_jobs,
-                    overwrite=overwrite,
-                    max_instances=max_instances,
-                    visualization_dir=visualization_dir
-                )
+            for dataset_idx, (dataset_key, dataset_file) in enumerate(available_datasets):
+                try:
+                    # Update progress description to show current dataset
+                    progress.update(dataset_progress,
+                                    description=f"Processing Datasets - Current: {dataset_key}")
 
-            except Exception as e:
-                logger.error(f"Failed to run benchmark on {dataset_key}: {e}")
+                    # Load dataset
+                    dataset_items, dataset_metadata = load_dataset(dataset_file)
+
+                    if not dataset_items:
+                        logger.warning(f"No items in dataset {dataset_key}, skipping")
+                        progress.advance(dataset_progress)
+                        continue
+
+                    # Use display name from metadata if available, fallback to dataset_key
+                    display_name = getattr(dataset_metadata, 'dataset_name', dataset_key)
+
+                    # Run benchmark with shared progress context
+                    self.run_dataset_benchmark(
+                        dataset_name=display_name,
+                        dataset_items=dataset_items,
+                        resultsdir=resultsdir,
+                        num_jobs=num_jobs,
+                        overwrite=overwrite,
+                        max_instances=max_instances,
+                        visualization_dir=visualization_dir,
+                        progress_context=progress
+                    )
+
+                except Exception as e:
+                    logger.error(f"Failed to run benchmark on {dataset_key}: {e}")
+
+                progress.advance(dataset_progress)
+
+        # Final completion message
+        self.console.print()
+        self.console.print(f"[bold green]✅ Benchmark completed! Processed {len(available_datasets)} datasets.")
+        self.console.print()
 
     def load_results(self, resultsdir: pathlib.Path, glob: str = "*.csv") -> pd.DataFrame:
         """Load benchmark results from CSV files.
