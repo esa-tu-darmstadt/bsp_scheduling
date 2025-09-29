@@ -10,41 +10,33 @@ import numpy as np
 
 
 def upward_rank(network: nx.Graph, task_graph: nx.DiGraph) -> Dict[Hashable, float]:
-    """Optimized upward rank calculation that pre-computes averages.
+    """Optimized upward rank calculation that pre-computes average speeds.
 
-    This is identical to the implementation in heft_busy_communication.py
-    but kept separate for modularity.
+    Precalculates average processor speed and average network speed once,
+    then computes execution times on the fly for better efficiency.
     """
     ranks = {}
 
-    # Pre-calculate average computation time for each task (across all processors)
-    avg_comp_times = {}
-    for task in task_graph.nodes:
-        task_weight = task_graph.nodes[task]['weight']
-        avg_comp_times[task] = np.mean([
-            task_weight / network.nodes[node]['weight']
-            for node in network.nodes
-        ])
+    # Precalculate average processor speed (scalar)
+    processor_speeds = [network.nodes[node]['weight'] for node in network.nodes]
+    avg_processor_speed = np.mean(processor_speeds)
 
-    # Pre-calculate average communication time for each edge (across all network links)
-    avg_comm_times = {}
+    # Precalculate average network speed (scalar)
     network_speeds = [network.edges[src, dst]['weight'] for src, dst in network.edges]
     avg_network_speed = np.mean(network_speeds)
-
-    for src_task, dst_task in task_graph.edges:
-        edge_weight = task_graph.edges[src_task, dst_task]['weight']
-        avg_comm_times[(src_task, dst_task)] = edge_weight / avg_network_speed
 
     # Calculate ranks in reverse topological order
     topological_order = list(nx.topological_sort(task_graph))
     for task in topological_order[::-1]:
-        avg_comp_time = avg_comp_times[task]
+        # Compute average computation time
+        task_weight = task_graph.nodes[task]['weight']
+        avg_comp_time = task_weight / avg_processor_speed
 
         # Find maximum successor rank + communication time
         max_comm_time = 0.0
         if task_graph.out_degree(task) > 0:
             max_comm_time = max(
-                ranks[successor] + avg_comm_times.get((task, successor), 0.0)
+                ranks[successor] + (task_graph.edges[task, successor]['weight'] / avg_network_speed)
                 for successor in task_graph.successors(task)
             )
 
@@ -54,26 +46,20 @@ def upward_rank(network: nx.Graph, task_graph: nx.DiGraph) -> Dict[Hashable, flo
 
 
 def downward_rank(network: nx.Graph, task_graph: nx.DiGraph) -> Dict[Hashable, float]:
-    """Optimized downward rank calculation that pre-computes averages."""
+    """Optimized downward rank calculation that pre-computes average speeds.
+
+    Precalculates average processor speed and average network speed once,
+    then computes execution times on the fly for better efficiency.
+    """
     ranks = {}
 
-    # Pre-calculate average computation time for each task (across all processors)
-    avg_comp_times = {}
-    for task in task_graph.nodes:
-        task_weight = task_graph.nodes[task]['weight']
-        avg_comp_times[task] = np.mean([
-            task_weight / network.nodes[node]['weight']
-            for node in network.nodes
-        ])
+    # Precalculate average processor speed (scalar)
+    processor_speeds = [network.nodes[node]['weight'] for node in network.nodes]
+    avg_processor_speed = np.mean(processor_speeds)
 
-    # Pre-calculate average communication time for each edge (across all network links)
-    avg_comm_times = {}
+    # Precalculate average network speed (scalar)
     network_speeds = [network.edges[src, dst]['weight'] for src, dst in network.edges]
     avg_network_speed = np.mean(network_speeds)
-
-    for src_task, dst_task in task_graph.edges:
-        edge_weight = task_graph.edges[src_task, dst_task]['weight']
-        avg_comm_times[(src_task, dst_task)] = edge_weight / avg_network_speed
 
     # Calculate ranks in topological order
     topological_order = list(nx.topological_sort(task_graph))
@@ -82,7 +68,8 @@ def downward_rank(network: nx.Graph, task_graph: nx.DiGraph) -> Dict[Hashable, f
             ranks[task] = 0.0
         else:
             max_pred_time = max(
-                ranks[pred] + avg_comm_times.get((pred, task), 0.0) + avg_comp_times[pred]
+                ranks[pred] + (task_graph.edges[pred, task]['weight'] / avg_network_speed) +
+                (task_graph.nodes[pred]['weight'] / avg_processor_speed)
                 for pred in task_graph.predecessors(task)
             )
             ranks[task] = max_pred_time
@@ -107,3 +94,27 @@ def cpop_ranks(network: nx.Graph, task_graph: nx.DiGraph) -> Dict[Hashable, floa
         task_name: (upward_ranks[task_name] + downward_ranks[task_name])
         for task_name in task_graph.nodes
     }
+
+
+def calculate_dynamic_downward_rank(task_name: str, task_graph: nx.DiGraph, schedule) -> float:
+    """Calculate dynamic downward rank (earliest start time) for a task.
+
+    The dynamic downward rank is the actual earliest starting time of the task,
+    which is the latest finishing time of any of its predecessors.
+
+    Args:
+        task_name: Task to calculate rank for
+        task_graph: Task dependency graph
+        schedule: Current partial schedule
+
+    Returns:
+        Dynamic downward rank (earliest start time)
+    """
+    earliest_start = 0.0
+
+    for pred_name in task_graph.predecessors(task_name):
+        if schedule.task_scheduled(pred_name):
+            pred_instance = schedule.get_single_instance(pred_name)
+            earliest_start = max(earliest_start, pred_instance.end)
+
+    return earliest_start
