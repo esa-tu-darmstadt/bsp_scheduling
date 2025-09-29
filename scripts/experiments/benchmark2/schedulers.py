@@ -9,6 +9,7 @@ from typing import List, Dict, Optional
 import logging
 
 # Import optimized delay model schedulers (replaces slow SAGA schedulers)
+from saga_bsp.misc.saga_scheduler_wrapper import preprocess_task_graph
 from saga_bsp.schedulers.delaymodel import HeftScheduler
 
 # Import BSP schedulers and utilities
@@ -22,16 +23,14 @@ logger = logging.getLogger(__name__)
 class UnifiedSchedulerWrapper:
     """Unified wrapper for all scheduler types with consistent interface."""
 
-    def __init__(self, scheduler, preprocess=False):
+    def __init__(self, scheduler):
         """Initialize unified scheduler wrapper.
 
         Args:
             scheduler: The underlying scheduler instance
-            preprocess: Whether to preprocess task graph for BSP schedulers
         """
         self.scheduler = scheduler
         self.scheduler_type = self._detect_scheduler_type(scheduler)
-        self.preprocess = preprocess
 
     def _detect_scheduler_type(self, scheduler):
         """Detect scheduler type based on its superclass."""
@@ -77,16 +76,8 @@ class UnifiedSchedulerWrapper:
             }
 
         else:  # BSP schedulers
-            # BSP schedulers use BSPHardware directly
-            # Preprocess task graph if needed
-            if self.preprocess:
-                # Some BSP schedulers expect preprocessing
-                task_graph_processed = task_graph.copy()
-            else:
-                task_graph_processed = task_graph
-
             # Run scheduler
-            schedule_result = self.scheduler.schedule(bsp_hardware, task_graph_processed)
+            schedule_result = self.scheduler.schedule(bsp_hardware, task_graph)
 
             # BSP schedulers return BSPSchedule objects with makespan property
             makespan = schedule_result.makespan
@@ -123,19 +114,21 @@ SCHEDULER_ORDER = [
     "HEFT-BSP-Eager",
     "FillInSplitBSPScheduler-HEFT",   # Native BSP schedulers
     "FillInSplitBSPScheduler-CPoP",
+    "FillInSplitBSPScheduler-DS",
     "BCSHScheduler-NoEFT",
     "BCSHScheduler-EFT"
 ]
 
 # Scheduler renames for display
 SCHEDULER_RENAMES = {
-    "HeftBusyCommScheduler": "HEFT (Busy Comm)",
-    "HEFT-BSP-EarliestNext": "HEFT-BSP-EarlNext",
-    "HEFT-BSP-Eager": "HEFT-BSP-Eager",
-    "FillInSplitBSPScheduler-HEFT": "FillInSplit-HEFT",
-    "FillInSplitBSPScheduler-CPoP": "FillInSplit-CPoP",
-    "BCSHScheduler-NoEFT": "BCSH-NoEFT",
-    "BCSHScheduler-EFT": "BCSH-EFT"
+    "HeftBusyCommScheduler": "HEFT",
+    "HEFT-BSP-EarliestNext": "HEFT + EFN",
+    "HEFT-BSP-Eager": "HEFT + Eager",
+    "FillInSplitBSPScheduler-HEFT": "BALS Upward-Rank",
+    "FillInSplitBSPScheduler-CPoP": "BALS Comb-Rank",
+    "FillInSplitBSPScheduler-DS": "BALS Dyn-Rank",
+    "BCSHScheduler-NoEFT": "BCSH (LDSH)",
+    "BCSHScheduler-EFT": "BCSH (EFT)"
 }
 
 def create_bsp_schedulers() -> Dict[str, object]:
@@ -175,23 +168,23 @@ def create_bsp_schedulers() -> Dict[str, object]:
     # 3. Native BSP schedulers - auto-detected as bsp
 
     schedulers["FillInSplitBSPScheduler-HEFT"] = UnifiedSchedulerWrapper(
-        FillInSplitBSPScheduler(priority_mode='heft'),
-        preprocess=True
+        FillInSplitBSPScheduler(priority_mode='heft')
     )
 
     schedulers["FillInSplitBSPScheduler-CPoP"] = UnifiedSchedulerWrapper(
-        FillInSplitBSPScheduler(priority_mode='cpop'),
-        preprocess=True
+        FillInSplitBSPScheduler(priority_mode='cpop')
+    )
+    
+    schedulers["FillInSplitBSPScheduler-DS"] = UnifiedSchedulerWrapper(
+        FillInSplitBSPScheduler(priority_mode='ds')
     )
 
     schedulers["BCSHScheduler-NoEFT"] = UnifiedSchedulerWrapper(
-        BCSHScheduler(use_eft=False),
-        preprocess=True
+        BCSHScheduler(use_eft=False)
     )
 
     schedulers["BCSHScheduler-EFT"] = UnifiedSchedulerWrapper(
-        BCSHScheduler(use_eft=True),
-        preprocess=True
+        BCSHScheduler(use_eft=True)
     )
 
     return schedulers
@@ -227,8 +220,6 @@ def get_scheduler_display_name(scheduler_name: str) -> str:
 def get_ordered_scheduler_names(scheduler_names: List[str]) -> List[str]:
     """Order scheduler names according to visualization requirements.
 
-    HeftBusyCommScheduler should be first as it's the async/delay model.
-
     Args:
         scheduler_names: List of scheduler names to order
 
@@ -243,10 +234,6 @@ def get_ordered_scheduler_names(scheduler_names: List[str]) -> List[str]:
         return order_map.get(name, len(SCHEDULER_ORDER))
 
     ordered_names = sorted(scheduler_names, key=get_order)
-
-    # Log the ordering for verification
-    if "HeftBusyCommScheduler" in ordered_names and ordered_names[0] != "HeftBusyCommScheduler":
-        logger.warning("HeftBusyCommScheduler should be first in ordering for proper delay model visualization")
 
     return ordered_names
 
