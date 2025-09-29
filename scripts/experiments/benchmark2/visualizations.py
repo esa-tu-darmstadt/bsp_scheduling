@@ -7,7 +7,7 @@ for scheduler reordering and special handling of delay model schedulers.
 
 import logging
 import pathlib
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -16,6 +16,60 @@ import numpy as np
 from schedulers import get_scheduler_display_name, get_ordered_scheduler_names, is_delay_model_scheduler
 
 logger = logging.getLogger(__name__)
+
+
+def organize_datasets_by_type(data: pd.DataFrame) -> Tuple[List[str], Dict[str, Tuple[int, int]]]:
+    """Organize datasets by their source type for grouped visualization.
+
+    Args:
+        data: DataFrame with benchmark results containing 'source_type' column
+
+    Returns:
+        Tuple of (ordered_datasets, group_boundaries)
+        where group_boundaries maps group_name to (start_idx, end_idx)
+    """
+    if 'source_type' not in data.columns:
+        # No source type info, return original sorted order
+        datasets = sorted(data['dataset'].unique())
+        return datasets, {}
+
+    # Get dataset to source_type mapping
+    dataset_types = data.groupby('dataset')['source_type'].first().to_dict()
+
+    # Group datasets by type
+    dataset_groups = {
+        'primitives': [],
+        'wfcommons': [],
+        'spn': []
+    }
+
+    for dataset, source_type in dataset_types.items():
+        if source_type in dataset_groups:
+            dataset_groups[source_type].append(dataset)
+
+    # Sort datasets within each group
+    for group in dataset_groups.values():
+        group.sort()
+
+    # Create ordered list and boundaries
+    ordered_datasets = []
+    group_boundaries = {}
+
+    # Order: primitives, wfcommons, spn
+    group_order = ['primitives', 'wfcommons', 'spn']
+    group_labels = {'primitives': 'Primitives', 'wfcommons': 'WfCommons', 'spn': 'SPNs'}
+
+    current_idx = 0
+    for group_name in group_order:
+        group_datasets = dataset_groups[group_name]
+        if group_datasets:
+            start_idx = current_idx
+            ordered_datasets.extend(group_datasets)
+            end_idx = current_idx + len(group_datasets)
+            group_boundaries[group_labels[group_name]] = (start_idx, end_idx)
+            current_idx = end_idx
+
+    return ordered_datasets, group_boundaries
 
 class BoxPlotVisualizer:
     """Box plot visualization for benchmark results."""
@@ -42,13 +96,16 @@ class BoxPlotVisualizer:
         # Clean and prepare data
         data = self._prepare_data(data)
 
-        # Generate plots by dataset
-        datasets = data['dataset'].unique()
+        # Generate plots by dataset (using grouped order)
+        datasets, _ = organize_datasets_by_type(data)
         for dataset in datasets:
             self._create_dataset_boxplot(data, dataset, outputdir)
 
         # Generate combined plot
         self._create_combined_boxplot(data, outputdir)
+
+        # Generate aggregated plot (all datasets and variations)
+        self._create_aggregated_boxplot(data, outputdir)
 
         logger.info(f"Box plots saved to {outputdir}")
 
@@ -67,9 +124,6 @@ class BoxPlotVisualizer:
 
     def _prepare_data(self, data: pd.DataFrame) -> pd.DataFrame:
         """Prepare data for visualization."""
-        # Clean scheduler names
-        data["scheduler"] = data["scheduler"].str.replace("Scheduler", "")
-
         # Apply display names
         data["scheduler_display"] = data["scheduler"].apply(get_scheduler_display_name)
 
@@ -123,8 +177,8 @@ class BoxPlotVisualizer:
         # Sort by scheduler order
         data = data.sort_values('scheduler_order')
 
-        # Create subplot for each dataset
-        datasets = sorted(data['dataset'].unique())
+        # Create subplot for each dataset (using grouped order)
+        datasets, _ = organize_datasets_by_type(data)
         n_datasets = len(datasets)
         cols = min(3, n_datasets)
         rows = (n_datasets + cols - 1) // cols
@@ -166,6 +220,33 @@ class BoxPlotVisualizer:
         plt.tight_layout()
         plt.savefig(outputdir / 'boxplot_combined.png', dpi=300, bbox_inches='tight')
         plt.savefig(outputdir / 'boxplot_combined.pdf', bbox_inches='tight')
+        plt.close()
+
+    def _create_aggregated_boxplot(self, data: pd.DataFrame, outputdir: pathlib.Path) -> None:
+        """Create single aggregated box plot comparing all schedulers across all datasets."""
+        plt.figure(figsize=(7.16/2, 4.5))
+
+        # Sort by scheduler order
+        data = data.sort_values('scheduler_order')
+
+        # Create box plot with all data aggregated
+        sns.boxplot(data=data, x='scheduler_display', y='makespan_ratio', palette='Set2')
+
+        plt.xlabel('Scheduler', fontsize=10)
+        plt.ylabel('Makespan Ratio', fontsize=10)
+        plt.xticks(rotation=45, ha='right')
+        plt.ylim(1, 5)  # Fixed scale from 1 to 5
+        plt.grid(visible=True, axis='y', linestyle='--', alpha=0.7)
+
+        # Add delay model separator if applicable
+        scheduler_names = data['scheduler'].unique()
+        delay_scheduler_count = sum(1 for name in scheduler_names if is_delay_model_scheduler(name))
+        if delay_scheduler_count > 0:
+            plt.axvline(x=delay_scheduler_count - 0.5, color='black', linewidth=2, alpha=0.8)
+
+        plt.tight_layout()
+        plt.savefig(outputdir / 'boxplot_aggregated.png', dpi=300, bbox_inches='tight')
+        plt.savefig(outputdir / 'boxplot_aggregated.pdf', bbox_inches='tight')
         plt.close()
 
 
@@ -213,9 +294,6 @@ class HeatmapVisualizer:
 
     def _prepare_data(self, data: pd.DataFrame) -> pd.DataFrame:
         """Prepare data for heatmap visualization."""
-        # Clean scheduler names
-        data["scheduler"] = data["scheduler"].str.replace("Scheduler", "")
-
         # Apply display names
         data["scheduler_display"] = data["scheduler"].apply(get_scheduler_display_name)
 
@@ -226,8 +304,8 @@ class HeatmapVisualizer:
         return data
 
     def _create_makespan_ratio_heatmap(self, data: pd.DataFrame, outputdir: pathlib.Path,
-                                     upper_threshold: float = 5.0, figsize: tuple = (7.16, 5)) -> None:
-        """Create heatmap showing all data variations as gradients within cells."""
+                                     upper_threshold: float = 5.0, figsize: tuple = (7.16, 5), label_textsize = 9) -> None:
+        """Create heatmap showing all data variations as gradients within cells using imshow."""
         import numpy as np
         from matplotlib.patches import Rectangle
 
@@ -236,8 +314,8 @@ class HeatmapVisualizer:
         ordered_names = get_ordered_scheduler_names(scheduler_names)
         ordered_display_names = [get_scheduler_display_name(name) for name in ordered_names]
 
-        # Get datasets
-        datasets = sorted(data['dataset'].unique())
+        # Get datasets organized by type
+        datasets, group_boundaries = organize_datasets_by_type(data)
 
         # Create figure
         fig, ax = plt.subplots(figsize=figsize)
@@ -253,7 +331,7 @@ class HeatmapVisualizer:
         global_min = min(1.0, data['makespan_ratio'].min())
         global_max = min(upper_threshold, data['makespan_ratio'].max())
 
-        # Create the heatmap by drawing each cell manually
+        # Create the heatmap using imshow approach (similar to SAGA)
         for i, dataset in enumerate(datasets):
             for j, scheduler_display in enumerate(ordered_display_names):
                 # Get all values for this scheduler-dataset combination
@@ -261,6 +339,10 @@ class HeatmapVisualizer:
                 values = data[mask]['makespan_ratio'].values
 
                 if len(values) == 0:
+                    # Add white cell if no data
+                    rect = Rectangle((j, len(datasets) - 1 - i), 1, 1,
+                                   linewidth=1, edgecolor='black', facecolor='white')
+                    ax.add_patch(rect)
                     continue
 
                 # Store original values for mean calculation
@@ -273,25 +355,36 @@ class HeatmapVisualizer:
                 cell_x = j
                 cell_y = len(datasets) - 1 - i  # Flip y-axis for proper ordering
 
-                if len(values) == 1:
-                    # Single value - fill entire cell
-                    color = cmap((values[0] - global_min) / (global_max - global_min))
-                    rect = Rectangle((cell_x, cell_y), 1, 1, facecolor=color, edgecolor='none', linewidth=0)
-                    ax.add_patch(rect)
+                # Sort values for gradient
+                sorted_values = np.sort(values)
+
+                # Create smooth gradient using imshow (like SAGA)
+                if len(sorted_values) > 1:
+                    gradient = sorted_values.reshape(1, -1)
+                    im = ax.imshow(
+                        gradient,
+                        cmap=cmap,
+                        aspect='auto',
+                        extent=[cell_x, cell_x + 1, cell_y, cell_y + 1],
+                        vmin=global_min,
+                        vmax=global_max
+                    )
                 else:
-                    # Multiple values - create gradient within cell
-                    sorted_values = np.sort(values)
+                    # Single value - use imshow for consistency
+                    gradient = sorted_values.reshape(1, -1)
+                    im = ax.imshow(
+                        gradient,
+                        cmap=cmap,
+                        aspect='auto',
+                        extent=[cell_x, cell_x + 1, cell_y, cell_y + 1],
+                        vmin=global_min,
+                        vmax=global_max
+                    )
 
-                    # Divide cell into segments based on number of values
-                    n_segments = len(values)
-                    segment_width = 1.0 / n_segments
-
-                    for k, value in enumerate(sorted_values):
-                        color = cmap((value - global_min) / (global_max - global_min))
-                        segment_x = cell_x + k * segment_width
-                        rect = Rectangle((segment_x, cell_y), segment_width, 1,
-                                       facecolor=color, edgecolor='none', linewidth=0)
-                        ax.add_patch(rect)
+                # Add cell border
+                rect = Rectangle((cell_x, cell_y), 1, 1,
+                               linewidth=1, edgecolor='black', facecolor='none')
+                ax.add_patch(rect)
 
                 # Add mean value as text (using original uncapped values)
                 mean_value = np.mean(original_values)
@@ -305,9 +398,9 @@ class HeatmapVisualizer:
 
         # Set ticks and labels
         ax.set_xticks(np.arange(len(ordered_display_names)) + 0.5)
-        ax.set_xticklabels(ordered_display_names, rotation=45, ha='right')
+        ax.set_xticklabels(ordered_display_names, rotation=45, ha='right', fontsize=label_textsize)
         ax.set_yticks(np.arange(len(datasets)) + 0.5)
-        ax.set_yticklabels(reversed(datasets))
+        ax.set_yticklabels(reversed(datasets), fontsize=label_textsize)
 
         # Add grid lines
         for i in range(len(ordered_display_names) + 1):
@@ -319,24 +412,241 @@ class HeatmapVisualizer:
         delay_scheduler_count = sum(1 for name in ordered_names if is_delay_model_scheduler(name))
         if delay_scheduler_count > 0:
             # Add vertical line after delay model schedulers
-            ax.axvline(x=delay_scheduler_count, color='black', linewidth=4, alpha=0.8)
+            ax.axvline(x=delay_scheduler_count, color='black', linewidth=4, alpha=1)
             # Add text annotation
-            ax.text(delay_scheduler_count/2, -0.3, 'Delay Model',
-                   ha='center', va='top', color='black', fontweight='bold', fontsize=10)
-            ax.text(delay_scheduler_count + (len(ordered_display_names) - delay_scheduler_count)/2, -0.3, 'BSP Models',
-                   ha='center', va='top', color='black', fontweight='bold', fontsize=10)
+            # ax.text(delay_scheduler_count/2, -0.3, 'Delay Model',
+            #        ha='center', va='top', color='black', fontweight='bold', fontsize=10)
+            # ax.text(delay_scheduler_count + (len(ordered_display_names) - delay_scheduler_count)/2, -0.3, 'BSP Models',
+            #        ha='center', va='top', color='black', fontweight='bold', fontsize=10)
 
         # Add colorbar
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=global_min, vmax=global_max))
         sm.set_array([])
         cbar = plt.colorbar(sm, ax=ax, shrink=0.8)
-        cbar.set_label(f'Makespan Ratio (capped at {upper_threshold})', fontsize=10)
+        cbar.set_label(f'Makespan Ratio', fontsize=label_textsize+1)
+
+        # Add visual separators between dataset groups
+        if group_boundaries:
+            for group_name, (start_idx, end_idx) in group_boundaries.items():
+                # Add horizontal line between groups (except before first group)
+                if start_idx > 0:
+                    ax.axhline(y=len(datasets) - start_idx, color='black', linewidth=4)
+
+                # Add group label on the right side (rotated 90 degrees)
+                group_center_y = len(datasets) - (start_idx + end_idx) / 2
+                ax.text(len(ordered_display_names) + 0.1, group_center_y, group_name,
+                       ha='left', va='center', fontsize=label_textsize+1, fontweight='bold',
+                       color='black', rotation=90)
 
         # Title and labels
-        plt.xlabel('Scheduler', fontsize=12)
-        plt.ylabel('Dataset', fontsize=12)
+        plt.xlabel('Scheduler', fontsize=label_textsize+1)
+        plt.ylabel('Dataset', fontsize=label_textsize+1)
 
         plt.tight_layout()
         plt.savefig(outputdir / 'heatmap_makespan_ratio.png', dpi=300, bbox_inches='tight')
         plt.savefig(outputdir / 'heatmap_makespan_ratio.pdf', bbox_inches='tight')
         plt.close()
+
+
+class ScheduleComparisonVisualizer:
+    """Schedule comparison visualization for detailed scheduler analysis."""
+
+    def __init__(self):
+        """Initialize schedule comparison visualizer."""
+        pass
+
+    def generate_schedule_comparisons(self, schedules_dir: pathlib.Path, outputdir: pathlib.Path,
+                                    dataset_name: str = None, task_idx: int = 0) -> None:
+        """Generate schedule comparison plots for a specific task instance.
+
+        Args:
+            schedules_dir: Directory containing saved schedule visualizations
+            outputdir: Directory to save comparison plots
+            dataset_name: Specific dataset to visualize (None for all)
+            task_idx: Task graph index to visualize
+        """
+        outputdir.mkdir(parents=True, exist_ok=True)
+
+        # Find available schedule files
+        schedule_files = self._find_schedule_files(schedules_dir, dataset_name, task_idx)
+
+        if not schedule_files:
+            logger.warning(f"No schedule files found for dataset {dataset_name}, task {task_idx}")
+            return
+
+        # Group by dataset
+        datasets = {}
+        for file_path, file_dataset, file_task_idx, scheduler in schedule_files:
+            if file_dataset not in datasets:
+                datasets[file_dataset] = {}
+            datasets[file_dataset][scheduler] = file_path
+
+        # Generate comparison plots for each dataset
+        for dataset, scheduler_files in datasets.items():
+            if dataset_name is None or dataset == dataset_name:
+                self._create_dataset_comparison(dataset, scheduler_files, task_idx, outputdir)
+
+        logger.info(f"Schedule comparison plots saved to {outputdir}")
+
+    def _find_schedule_files(self, schedules_dir: pathlib.Path, dataset_name: str, task_idx: int) -> List[Tuple]:
+        """Find schedule visualization files matching criteria."""
+        schedule_files = []
+
+        if not schedules_dir.exists():
+            return schedule_files
+
+        # Look for PKL files in nested structure: {dataset}/task{task_idx}/*.pkl
+        # Pattern: {dataset_name}_{scheduler_name}_task{task_idx}.pkl
+        if dataset_name is not None:
+            # Search specific dataset
+            dataset_dirs = [schedules_dir / dataset_name]
+        else:
+            # Search all dataset directories
+            dataset_dirs = [d for d in schedules_dir.iterdir() if d.is_dir()]
+
+        for dataset_dir in dataset_dirs:
+            if not dataset_dir.is_dir():
+                continue
+
+            file_dataset = dataset_dir.name
+            task_dir = dataset_dir / f"task{task_idx}"
+
+            if not task_dir.exists():
+                continue
+
+            # Find PKL files in the task directory
+            for file_path in task_dir.glob("*.pkl"):
+                # Expected pattern: {dataset_name}_{scheduler_name}_task{task_idx}.pkl
+                parts = file_path.stem.split('_')
+                if len(parts) >= 3 and parts[-1] == f"task{task_idx}":
+                    # Extract scheduler name (everything between dataset and task)
+                    dataset_parts = file_dataset.split('_')
+                    # Find where dataset name ends and scheduler begins
+                    scheduler_start = len(dataset_parts)
+                    scheduler_parts = parts[scheduler_start:-1]  # Exclude the "task{X}" part
+                    scheduler = '_'.join(scheduler_parts)
+
+                    if scheduler:  # Make sure we found a valid scheduler name
+                        schedule_files.append((file_path, file_dataset, task_idx, scheduler))
+
+        return schedule_files
+
+    def _create_dataset_comparison(self, dataset: str, scheduler_files: Dict[str, pathlib.Path],
+                                 task_idx: int, outputdir: pathlib.Path) -> None:
+        """Create comparison plot for all schedulers on a dataset task."""
+        from schedulers import get_ordered_scheduler_names, get_scheduler_display_name
+        import pickle
+
+        # Load schedule results
+        schedule_results = {}
+        for scheduler, file_path in scheduler_files.items():
+            try:
+                with open(file_path, 'rb') as f:
+                    schedule_data = pickle.load(f)
+                    schedule_results[scheduler] = schedule_data
+            except Exception as e:
+                logger.warning(f"Failed to load schedule for {scheduler}: {e}")
+
+        if not schedule_results:
+            logger.warning(f"No valid schedule results for {dataset}")
+            return
+
+        # Order schedulers consistently
+        available_schedulers = list(schedule_results.keys())
+        ordered_schedulers = get_ordered_scheduler_names(available_schedulers)
+
+        # Calculate layout: 3 columns per row
+        n_schedulers = len(ordered_schedulers)
+        n_cols = 3
+        n_rows = (n_schedulers + n_cols - 1) // n_cols
+
+        # Create figure with tight layout for paper
+        # Use same width as heatmap (7.16 inches)
+        fig_width = 7.16
+        fig_height = n_rows * 2.0  # 2 inches per row
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height))
+
+        # Handle single row case
+        if n_rows == 1:
+            axes = axes.reshape(1, -1) if n_cols > 1 else [[axes]]
+        elif n_cols == 1:
+            axes = axes.reshape(-1, 1)
+
+        # Plot each scheduler
+        for idx, scheduler in enumerate(ordered_schedulers):
+            row = idx // n_cols
+            col = idx % n_cols
+            ax = axes[row][col]
+
+            schedule_data = schedule_results[scheduler]
+            scheduler_display = get_scheduler_display_name(scheduler)
+
+            self._plot_single_schedule(ax, schedule_data, scheduler_display)
+
+        # Hide unused subplots
+        for idx in range(n_schedulers, n_rows * n_cols):
+            row = idx // n_cols
+            col = idx % n_cols
+            axes[row][col].set_visible(False)
+
+        # Adjust layout for paper figure
+        plt.tight_layout(pad=0.3)
+
+        # Save figure
+        filename = f"schedule_comparison_{dataset}_task{task_idx}"
+        plt.savefig(outputdir / f"{filename}.png", dpi=300, bbox_inches='tight')
+        plt.savefig(outputdir / f"{filename}.pdf", bbox_inches='tight')
+        plt.close()
+
+        logger.info(f"Created schedule comparison for {dataset}, task {task_idx}")
+
+    def _plot_single_schedule(self, ax: plt.Axes, schedule_data: Dict, scheduler_name: str) -> None:
+        """Plot a single schedule on the given axis."""
+        try:
+            if 'schedule_type' in schedule_data and schedule_data['schedule_type'] == 'bsp':
+                # BSP schedule
+                from saga_bsp.utils.visualization import draw_bsp_gantt
+                bsp_schedule = schedule_data['schedule']
+
+                draw_bsp_gantt(
+                    bsp_schedule=bsp_schedule,
+                    axis=ax,
+                    show_phases=True,
+                    show_task_names=False,  # Hide task names for space
+                    figsize=None,  # Don't create new figure
+                    legend_loc=None,  # No legend for space
+                    font_size=8,  # Smaller font
+                    tick_font_size=7
+                )
+
+            elif 'schedule_type' in schedule_data and schedule_data['schedule_type'] == 'busy_comm':
+                # Busy communication schedule
+                from saga_bsp.utils.visualization import draw_busy_comm_gantt
+                async_schedule = schedule_data['schedule']
+
+                draw_busy_comm_gantt(
+                    schedule=async_schedule,
+                    axis=ax,
+                    figsize=None,  # Don't create new figure
+                    legend_loc=None,  # No legend for space
+                    font_size=8,  # Smaller font
+                    tick_font_size=7,
+                    draw_task_labels=False  # Hide task labels for space
+                )
+            else:
+                # Generic async schedule (fallback)
+                ax.text(0.5, 0.5, f'Schedule\n{scheduler_name}',
+                       ha='center', va='center', transform=ax.transAxes)
+
+            # Set title with scheduler name
+            ax.set_title(scheduler_name, fontsize=9, pad=2)
+
+            # Optimize axis for space
+            ax.tick_params(labelsize=6)
+            ax.set_xlabel('Time', fontsize=7)
+            ax.set_ylabel('Processors', fontsize=7)
+
+        except Exception as e:
+            logger.warning(f"Failed to plot schedule for {scheduler_name}: {e}")
+            ax.text(0.5, 0.5, f'Error\n{scheduler_name}',
+                   ha='center', va='center', transform=ax.transAxes)
