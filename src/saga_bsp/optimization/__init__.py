@@ -9,13 +9,15 @@ from .simulated_annealing import (
     MergeSupersteps,
     SimulatedAnnealingIteration
 )
+from .superstep_elimination import optimize_superstep_elimination
 
 __all__ = [
     'BSPSimulatedAnnealing',
     'ScheduleAction',
-    'MoveTaskToSuperstep', 
+    'MoveTaskToSuperstep',
     'MoveTaskToProcessor',
     'DuplicateAndMoveTask',
     'MergeSupersteps',
-    'SimulatedAnnealingIteration'
+    'SimulatedAnnealingIteration',
+    'optimize_superstep_elimination'
 ]

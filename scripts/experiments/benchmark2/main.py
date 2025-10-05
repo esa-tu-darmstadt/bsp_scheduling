@@ -131,8 +131,7 @@ def main():
             cache_dir=args.datadir,
             get_task_count=lambda idx, task_counts: task_counts[idx % len(task_counts)],
             get_variations_per_tile=lambda tile_counts: max(5, len(tile_counts)),
-            overwrite_cache=args.overwrite,
-            console=console
+            overwrite_cache=args.overwrite
         )
         logger.info(f"Generated {len(wfcommons_datasets)} WfCommons datasets")
 

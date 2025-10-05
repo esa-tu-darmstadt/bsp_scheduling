@@ -17,8 +17,6 @@ from dataclasses import dataclass
 
 import networkx as nx
 import numpy as np
-from rich.console import Console
-from rich.progress import track
 from saga_bsp.misc.saga_scheduler_wrapper import preprocess_task_graph
 from saga_bsp.schedule import BSPHardware
 from saga_bsp.hardware import IPUHardware
@@ -98,13 +96,15 @@ def generate_wfcommons_dataset(cache_dir: pathlib.Path, recipe_name: str,
 
     dataset_items = []
     variations_per_tile = get_variations_per_tile(tile_counts)
+    total_variations = len(tile_counts) * variations_per_tile
     variation_count = 0
 
-    for tile_count in track(tile_counts, description=f"[green]Generating {recipe_name}"):
+    for tile_count in tile_counts:
         for variation_idx in range(variations_per_tile):
             variation_count += 1
 
             try:
+                
                 # Set deterministic seed for reproducibility
                 seed = hash(f"wfcommons_{recipe_name}_{tile_count}_{variation_idx}") % (2**32)
                 random.seed(seed)
@@ -147,6 +147,9 @@ def generate_wfcommons_dataset(cache_dir: pathlib.Path, recipe_name: str,
 
                 dataset_items.append(DatasetItem(task_graph=task_graph, hardware=bsp_hardware, metadata=metadata))
 
+                if variation_count % 5 == 0:
+                    logger.info(f"Generated {variation_count}/{total_variations} WfCommons variations")
+
             except Exception as e:
                 logger.warning(f"Failed to generate WfCommons variation {variation_count}: {e}")
                 continue
@@ -176,7 +179,7 @@ def generate_wfcommons_dataset(cache_dir: pathlib.Path, recipe_name: str,
 
 def generate_spn_dataset(cache_dir: pathlib.Path, spn_filename: str,
                          spn_data_dir: Optional[pathlib.Path] = None,
-                         tile_counts: List[int] = [4, 16, 32, 92],
+                         tile_counts: List[int] = [4, 16, 32, 92, 184],
                          overwrite_cache: bool = False) -> Tuple[List[DatasetItem], str]:
     """Generate datasets for Sum-Product Networks.
 
@@ -219,7 +222,7 @@ def generate_spn_dataset(cache_dir: pathlib.Path, spn_filename: str,
     dataset_items = []
     variation_count = 0
 
-    for tile_count in track(tile_counts, description=f"[blue]Generating SPN {dataset_display_name}"):
+    for tile_count in tile_counts:
         variation_count += 1
 
         try:
@@ -256,6 +259,9 @@ def generate_spn_dataset(cache_dir: pathlib.Path, spn_filename: str,
 
             dataset_items.append(DatasetItem(task_graph=task_graph, hardware=bsp_hardware, metadata=metadata))
 
+            if variation_count % 5 == 0:
+                logger.info(f"Generated {variation_count}/{len(tile_counts)} SPN variations")
+
         except Exception as e:
             logger.warning(f"Failed to generate SPN variation {variation_count}: {e}")
             continue
@@ -284,10 +290,9 @@ def generate_spn_dataset(cache_dir: pathlib.Path, spn_filename: str,
 
 def generate_wfcommons_datasets(cache_dir: pathlib.Path,
                                get_task_count: Optional[Callable[[int], int]] = None,
-                               tile_counts: List[int] = [2, 4, 16, 32, 92],
+                               tile_counts: List[int] = [2, 4, 16, 32, 92, 184],
                                get_variations_per_tile: Callable[[List[int]], int] = None,
-                               overwrite_cache: bool = False,
-                               console: Console = None) -> Dict[str, Tuple[List[DatasetItem], str]]:
+                               overwrite_cache: bool = False) -> Dict[str, Tuple[List[DatasetItem], str]]:
     """Generate datasets for all available WfCommons recipes.
 
     Args:
@@ -324,7 +329,7 @@ def generate_wfcommons_datasets(cache_dir: pathlib.Path,
 
 def generate_spn_datasets(cache_dir: pathlib.Path,
                          spn_data_dir: Optional[pathlib.Path] = None,
-                         tile_counts: List[int] = [2, 4, 16, 32, 92],
+                         tile_counts: List[int] = [2, 4, 16, 32, 92, 184],
                          overwrite_cache: bool = False) -> Dict[str, Tuple[List[DatasetItem], str]]:
     """Generate datasets for all available SPN files.
 
@@ -367,7 +372,7 @@ def generate_spn_datasets(cache_dir: pathlib.Path,
 
 
 def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
-                               tile_counts: List[int] = [2, 4, 16, 32, 92],
+                               tile_counts: List[int] = [2, 4, 16, 32, 92, 184],
                                variations_per_tile: int = 5,
                                overwrite_cache: bool = False) -> Tuple[List[DatasetItem], str]:
     """Generate dataset for a primitive graph type using SAGA.
@@ -382,29 +387,10 @@ def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
     Returns:
         Tuple of (dataset_items, dataset_display_name)
     """
-    # Hardcoded configurations for each graph type
-    if graph_type == 'in_tree':
-        num_levels = np.random.randint(3, 6)
-        branching_factor = np.random.randint(3, 6)
-        config_str = f"{num_levels}_{branching_factor}"
-    elif graph_type == 'out_tree':
-        num_levels = np.random.randint(3, 6)
-        branching_factor = np.random.randint(3, 6)
-        config_str = f"{num_levels}_{branching_factor}"
-    elif graph_type == 'parallel_chains':
-        num_chains = np.random.randint(3, 6)
-        chain_length = np.random.randint(3, 6)
-        config_str = f"{num_chains}_{chain_length}"
-    else:
-        raise ValueError(f"Unsupported graph type: {graph_type}")
-
-    get_task_weight = lambda task_id: np.random.uniform(1.0, 10.0)
-    get_dependency_weight = lambda src_id, dst_id: np.random.uniform(0.5, 5.0)
-
     dataset_display_name = f"{graph_type}"
 
-    # Create cache key
-    cache_key = f"primitives_{graph_type}_{config_str}"
+    # Create cache key (no config string, all variations in one file)
+    cache_key = f"primitives_{graph_type}"
     cache_path = cache_dir / f"{cache_key}_dataset.pkl"
 
     # Check cache first
@@ -417,28 +403,46 @@ def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
         except Exception as e:
             logger.warning(f"Failed to load cached dataset {cache_key}: {e}")
 
-    logger.info(f"Generating primitives dataset for {graph_type} with config {config_str}...")
+    logger.info(f"Generating primitives dataset for {graph_type}...")
 
     dataset_items = []
+    total_variations = len(tile_counts) * variations_per_tile
     variation_count = 0
 
-    for tile_count in track(tile_counts, description=f"[yellow]Generating {graph_type} primitives"):
+    for tile_count in tile_counts:
         for variation_idx in range(variations_per_tile):
             variation_count += 1
 
             try:
                 # Set deterministic seed for reproducibility
-                seed = hash(f"primitives_{graph_type}_{config_str}_{tile_count}_{variation_idx}") % (2**32)
+                seed = hash(f"primitives_{graph_type}_{tile_count}_{variation_idx}") % (2**32)
                 random.seed(seed)
                 np.random.seed(seed)
 
-                # Generate primitive graph using SAGA
+                # Generate random configuration for this variation (like WfCommons does)
                 if graph_type == 'in_tree':
-                    task_graphs = gen_in_trees(1, num_levels, branching_factor, get_task_weight, get_dependency_weight)
+                    num_levels = np.random.randint(3, 6)
+                    branching_factor = np.random.randint(3, 6)
+                    task_graphs = gen_in_trees(1, num_levels, branching_factor,
+                                               lambda task_id: np.random.uniform(1.0, 10.0),
+                                               lambda src_id, dst_id: np.random.uniform(0.5, 5.0))
+                    config_str = f"{num_levels}_{branching_factor}"
                 elif graph_type == 'out_tree':
-                    task_graphs = gen_out_trees(1, num_levels, branching_factor, get_task_weight, get_dependency_weight)
+                    num_levels = np.random.randint(3, 6)
+                    branching_factor = np.random.randint(3, 6)
+                    task_graphs = gen_out_trees(1, num_levels, branching_factor,
+                                                lambda task_id: np.random.uniform(1.0, 10.0),
+                                                lambda src_id, dst_id: np.random.uniform(0.5, 5.0))
+                    config_str = f"{num_levels}_{branching_factor}"
                 elif graph_type == 'parallel_chains':
-                    task_graphs = gen_parallel_chains(1, num_chains, chain_length, get_task_weight, get_dependency_weight)
+                    num_chains = np.random.randint(5, 50)
+                    chain_length = np.random.randint(5, 50)
+                    task_graphs = gen_parallel_chains(1, num_chains, chain_length,
+                                                      lambda task_id: np.random.uniform(1.0, 10.0),
+                                                      lambda src_id, dst_id: np.random.uniform(0.5, 5.0))
+                    config_str = f"{num_chains}_{chain_length}"
+                else:
+                    raise ValueError(f"Unsupported graph type: {graph_type}")
 
                 task_graph = task_graphs[0]
                 task_graph, _ = preprocess_task_graph(task_graph)
@@ -462,7 +466,7 @@ def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
                 # Create metadata
                 metadata = {
                     'source_type': 'primitives',
-                    'source_name': f"{graph_type}_{config_str}",
+                    'source_name': graph_type,
                     'dataset_name': dataset_display_name,
                     'task_count': len(task_graph.nodes()),
                     'edge_count': len(task_graph.edges()),
@@ -473,10 +477,14 @@ def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
                     'target_ccr': target_ccr,
                     'actual_ccr': final_ccr,
                     'graph_type': graph_type,
+                    'config': config_str,
                     'base_metadata': None
                 }
 
                 dataset_items.append(DatasetItem(task_graph=task_graph, hardware=bsp_hardware, metadata=metadata))
+
+                if variation_count % 5 == 0:
+                    logger.info(f"Generated {variation_count}/{total_variations} {graph_type} variations")
 
             except Exception as e:
                 logger.warning(f"Failed to generate {graph_type} variation {variation_count}: {e}")
@@ -490,7 +498,7 @@ def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
     if dataset_items:
         dataset_metadata = DatasetMetadata(
             source_type='primitives',
-            source_name=f"{graph_type}_{config_str}",
+            source_name=graph_type,
             dataset_name=dataset_display_name,
             num_variations=len(dataset_items),
             tile_counts=tile_counts,
@@ -506,8 +514,8 @@ def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
 
 
 def generate_primitives_datasets(cache_dir: pathlib.Path,
-                                tile_counts: List[int] = [4, 16, 32, 92],
-                                variations_per_tile: int = 3,
+                                tile_counts: List[int] = [2, 4, 16, 32, 92, 184],
+                                variations_per_tile: int = 10,
                                 overwrite_cache: bool = False) -> Dict[str, Tuple[List[DatasetItem], str]]:
     """Generate datasets for all primitive graph types.
 

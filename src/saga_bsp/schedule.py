@@ -45,7 +45,7 @@ class BSPTask:
     """Extended task for BSP scheduling"""
 
     def __init__(self, node: str, proc: str, superstep: "Superstep"):
-        self.node = node  # The node where the task is executed
+        self.node = node  # The node in the task graph
         self.proc = proc  # The processor on which the task is executed
         self.superstep = superstep  # The superstep this task belongs to
 
@@ -439,6 +439,47 @@ class Superstep:
             Absolute time when computation starts for this processor
         """
         return self.start_time + self.sync_time + self.exchange_time(processor)
+
+    def check_precedence_constraints(self) -> Tuple[bool, List[str]]:
+        """Check if this superstep satisfies all precedence constraints.
+
+        Returns:
+            Tuple of (is_valid, list_of_error_messages)
+        """
+        errors = []
+
+        # Check each task in this superstep
+        for processor, tasks in self.tasks.items():
+            for task_idx, task in enumerate(tasks):
+                # Check all predecessors
+                for pred_name in self.task_graph.predecessors(task.node):
+                    # Check if predecessor is available
+                    pred_available = False
+
+                    # Option 1: Predecessor in earlier superstep
+                    for ss_idx in range(self.index):
+                        ss = self.schedule.supersteps[ss_idx]
+                        for proc, proc_tasks in ss.tasks.items():
+                            if any(t.node == pred_name for t in proc_tasks):
+                                pred_available = True
+                                break
+                        if pred_available:
+                            break
+
+                    # Option 2: Predecessor in same superstep, same processor, before this task
+                    if not pred_available and processor in self.tasks:
+                        for idx, t in enumerate(self.tasks[processor]):
+                            if idx >= task_idx:
+                                break
+                            if t.node == pred_name:
+                                pred_available = True
+                                break
+
+                    if not pred_available:
+                        errors.append(f"Task {task.node} in superstep {self.index} on {processor} "
+                                    f"missing predecessor {pred_name}")
+
+        return (len(errors) == 0, errors)
 
 
 class BSPSchedule:

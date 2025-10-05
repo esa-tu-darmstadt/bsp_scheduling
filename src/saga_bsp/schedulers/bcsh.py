@@ -356,7 +356,7 @@ def _group_layers(
         # Repeat merging until no merge occurs in a full pass
         merged_in_pass = True
         while merged_in_pass:
-            if use_eft:
+            if use_eft and False:
                 break
             merged_in_pass = False
             # Sort groups by weight increasing
@@ -408,7 +408,7 @@ def _group_layers(
             for lev in range(next_level + 1, lmax + 1):
                 remain_nodes.extend(V_levels.get(lev, []))
             t_remain = _omega_of_nodes(G, remain_nodes)
-            if t_remain >= (t_remain / max(1, p)) + tau_max - 1e-12 or use_eft:
+            if t_remain >= (t_remain / max(1, p)) + tau_max - 1e-12: # or use_eft:
                 # Enforce balancedness
                 LM_val = LM_of_groups(CC, p)
                 W_val = layer_weight(CC)

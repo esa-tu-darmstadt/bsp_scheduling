@@ -125,10 +125,10 @@ SCHEDULER_RENAMES = {
     "HeftBusyCommScheduler": "HEFT",
     "HEFT-BSP-EarliestNext": "HEFT + EFN",
     "HEFT-BSP-Eager": "HEFT + Eager",
-    "FillInSplitBSPScheduler-HEFT": "BALS Upward-Rank",
-    "FillInSplitBSPScheduler-CPoP": "BALS Comb-Rank",
-    "FillInSplitBSPScheduler-DS": "BALS Dyn-Rank",
-    "FillInSplitBSPScheduler-HEFT-Merge": "BALS Upward-Rank + Merge",
+    "FillInSplitBSPScheduler-HEFT": "BALS Upward",
+    "FillInSplitBSPScheduler-CPoP": "BALS Combined",
+    # "FillInSplitBSPScheduler-DS": "BALS Dyn. Comb.",
+    "FillInSplitBSPScheduler-HEFT-Merge": "BALS Upw. + Elim.",
     "BCSHScheduler-NoEFT": "BCSH (LDSH)",
     "BCSHScheduler-EFT": "BCSH (EFT)"
 }
@@ -177,13 +177,17 @@ def create_bsp_schedulers() -> Dict[str, object]:
         FillInSplitBSPScheduler(priority_mode='cpop')
     )
     
-    schedulers["FillInSplitBSPScheduler-DS"] = UnifiedSchedulerWrapper(
-        FillInSplitBSPScheduler(priority_mode='ds')
-    )
+    # schedulers["FillInSplitBSPScheduler-DS"] = UnifiedSchedulerWrapper(
+    #     FillInSplitBSPScheduler(priority_mode='ds')
+    # )
     
     schedulers["FillInSplitBSPScheduler-HEFT-Merge"] = UnifiedSchedulerWrapper(
         FillInSplitBSPScheduler(priority_mode='heft', optimize_merging=True)
     )
+    
+    # schedulers["FillInSplitBSPScheduler-CPOP-Merge"] = UnifiedSchedulerWrapper(
+    #     FillInSplitBSPScheduler(priority_mode='cpop', optimize_merging=True)
+    # )
 
     schedulers["BCSHScheduler-NoEFT"] = UnifiedSchedulerWrapper(
         BCSHScheduler(use_eft=False)

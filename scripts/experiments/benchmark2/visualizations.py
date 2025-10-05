@@ -555,6 +555,17 @@ class ScheduleComparisonVisualizer:
         available_schedulers = list(schedule_results.keys())
         ordered_schedulers = get_ordered_scheduler_names(available_schedulers)
 
+        # Calculate consistent x-limit for all schedulers
+        # Get maximum makespan from all schedulers
+        max_xlim = 0
+        for scheduler in ordered_schedulers:
+            schedule_data = schedule_results[scheduler]
+            makespan = schedule_data.get('makespan', 0)
+            max_xlim = max(max_xlim, makespan)
+
+        # Add 5% padding
+        consistent_xlim = max_xlim * 1.05 if max_xlim > 0 else None
+
         # Calculate layout: 3 columns per row
         n_schedulers = len(ordered_schedulers)
         n_cols = 3
@@ -581,7 +592,7 @@ class ScheduleComparisonVisualizer:
             schedule_data = schedule_results[scheduler]
             scheduler_display = get_scheduler_display_name(scheduler)
 
-            self._plot_single_schedule(ax, schedule_data, scheduler_display)
+            self._plot_single_schedule(ax, schedule_data, scheduler_display, xlim=consistent_xlim)
 
         # Hide unused subplots
         for idx in range(n_schedulers, n_rows * n_cols):
@@ -600,8 +611,15 @@ class ScheduleComparisonVisualizer:
 
         logger.info(f"Created schedule comparison for {dataset}, task {task_idx}")
 
-    def _plot_single_schedule(self, ax: plt.Axes, schedule_data: Dict, scheduler_name: str) -> None:
-        """Plot a single schedule on the given axis."""
+    def _plot_single_schedule(self, ax: plt.Axes, schedule_data: Dict, scheduler_name: str, xlim: Optional[float] = None) -> None:
+        """Plot a single schedule on the given axis.
+
+        Args:
+            ax: Matplotlib axis to plot on
+            schedule_data: Schedule data dictionary
+            scheduler_name: Display name for the scheduler
+            xlim: Optional x-axis limit to use for consistent scaling across plots
+        """
         try:
             if 'schedule_type' in schedule_data and schedule_data['schedule_type'] == 'bsp':
                 # BSP schedule
@@ -641,10 +659,27 @@ class ScheduleComparisonVisualizer:
             # Set title with scheduler name
             ax.set_title(scheduler_name, fontsize=9, pad=2)
 
+            # Set consistent x-axis limit if provided
+            if xlim is not None:
+                ax.set_xlim(0, xlim)
+
             # Optimize axis for space
             ax.tick_params(labelsize=6)
             ax.set_xlabel('Time', fontsize=7)
-            ax.set_ylabel('Processors', fontsize=7)
+
+            # Remove y-axis label and replace processor names with integers (1 to n)
+            ax.set_ylabel('Processor')
+
+            # Get current y-axis limits to determine number of processors
+            ylim = ax.get_ylim()
+            n_processors = int(ylim[1] - ylim[0]) + 1
+
+            # Set integer tick labels (1 to n_processors)
+            current_yticks = ax.get_yticks()
+            if len(current_yticks) > 0:
+                # Map from 0-indexed positions to 1-indexed labels
+                integer_labels = [str(int(tick) + 1) if 0 <= tick < n_processors else '' for tick in current_yticks]
+                ax.set_yticklabels(integer_labels)
 
         except Exception as e:
             logger.warning(f"Failed to plot schedule for {scheduler_name}: {e}")

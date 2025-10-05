@@ -116,7 +116,7 @@ def save_schedule_visualization(schedule_result: Dict[str, Any],
         with open(schedule_data_filepath, 'wb') as f:
             pickle.dump(schedule_data, f)
 
-        logger.info(f"Saved schedule visualization to {filepath}")
+        logger.debug(f"Saved schedule visualization to {filepath}")
         logger.debug(f"Saved schedule data to {schedule_data_filepath}")
 
     except Exception as e:
@@ -138,5 +138,5 @@ def should_save_visualization(task_graph_idx: int, dataset_name: str,
         True if visualization should be saved
     """
     # Save only the first task graph for each dataset/scheduler combination
-    return True
+    return False
     return task_graph_idx == 1 or task_graph_idx == 4

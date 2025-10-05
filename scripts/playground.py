@@ -11,11 +11,10 @@ import matplotlib.pyplot as plt
 import networkx as nx
 
 import saga_bsp as bsp
-from saga_bsp.schedulers import MSAScheduler, FillInSplitBSPScheduler, BCSHScheduler
+from saga_bsp.schedulers import MSAScheduler, FillInSplitBSPScheduler, BCSHScheduler, FillInAppendBSPScheduler
 from saga_bsp.optimization.simulated_annealing_v2 import BSPSimulatedAnnealing
 from saga_bsp.misc import HeftBusyCommScheduler
 
-import tikzplotlib as tikz
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -52,8 +51,8 @@ print()
 print("Network edges:", list(network.edges(data=True)))
 print("Task graph edges:", list(task_graph.edges(data=True)))
 
-draw_network(network)
-draw_task_graph(task_graph)
+# draw_network(network)
+# draw_task_graph(task_graph)
 
 # Test async scheduler first
 async_scheduler = HeftBusyCommScheduler()
@@ -92,15 +91,17 @@ bsp_hardware = bsp.BSPHardware(network=network, sync_time=0)
 
 # Test the HEFT BSP scheduler
 # heft_bsp_scheduler = FillInSplitBSPScheduler(verbose=True, draw_after_each_step=False)
-bsp_schedule = BCSHScheduler(verbose=True, use_eft=True).schedule(bsp_hardware, task_graph)
+bsp_schedule = BCSHScheduler(verbose=False, use_eft=True).schedule(bsp_hardware, task_graph)
 bsp.draw_bsp_gantt(bsp_schedule, title="BCSH")
 
 bsp_schedule = FillInSplitBSPScheduler(priority_mode="heft").schedule(bsp_hardware, task_graph)
 bsp.draw_bsp_gantt(bsp_schedule, title="FillInSplitBSP+heft")
 
+bsp_schedule = FillInAppendBSPScheduler(priority_mode="heft", verbose=True).schedule(bsp_hardware, task_graph)
+bsp.draw_bsp_gantt(bsp_schedule, title="FillInAppendBSP+heft")
 
-bsp_schedule = FillInSplitBSPScheduler(priority_mode="cpop").schedule(bsp_hardware, task_graph)
-bsp.draw_bsp_gantt(bsp_schedule, title="FillInSplitBSP+cpop")
+# bsp_schedule = FillInSplitBSPScheduler(priority_mode="cpop").schedule(bsp_hardware, task_graph)
+# bsp.draw_bsp_gantt(bsp_schedule, title="FillInSplitBSP+cpop")
 
 bsp_schedule.assert_valid()
 

@@ -7,6 +7,7 @@ managing results storage and providing progress tracking.
 
 import logging
 import pathlib
+import time
 from typing import Dict, List, Optional, Any
 import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -25,7 +26,11 @@ def run_single_scheduler_task(scheduler_name, scheduler, dataset_item, task_grap
     logger.debug(f"Running scheduler {scheduler_name} on task graph {task_graph_idx}")
     try:
         # All schedulers now use the unified interface
+        start_time = time.perf_counter()
         result = scheduler.schedule(dataset_item.hardware, dataset_item.task_graph)
+        end_time = time.perf_counter()
+
+        scheduler_runtime_s = end_time - start_time
         makespan = result['makespan']
 
         # Save schedule visualization for first task graph of each dataset/scheduler
@@ -42,6 +47,7 @@ def run_single_scheduler_task(scheduler_name, scheduler, dataset_item, task_grap
         return {
             'scheduler_name': scheduler_name,
             'makespan': makespan,
+            'scheduler_runtime_s': scheduler_runtime_s,
             'task_graph_idx': task_graph_idx,
             'target_ccr': dataset_item.metadata.get('target_ccr'),
             'actual_ccr': dataset_item.metadata.get('actual_ccr'),
@@ -158,6 +164,11 @@ class BenchmarkRunner:
                     progress.advance(scheduler_progress_tasks[scheduler_name])
                     progress.advance(overall_task)
 
+        # Remove all tasks for this dataset (cleanup)
+        progress.remove_task(overall_task)
+        for scheduler_name, task_id in scheduler_progress_tasks.items():
+            progress.remove_task(task_id)
+
         # Close progress context if we created it
         if should_close_progress:
             progress.stop()
@@ -224,6 +235,7 @@ class BenchmarkRunner:
                     'scheduler': result['scheduler_name'],
                     'makespan': result['makespan'],
                     'makespan_ratio': ratio,
+                    'scheduler_runtime_s': result['scheduler_runtime_s'],
                     'task_graph_idx': result['task_graph_idx'],
                     'target_ccr': result.get('target_ccr'),
                     'actual_ccr': result.get('actual_ccr'),

@@ -54,11 +54,12 @@ def _compute_series_stats(series: pd.Series) -> Dict[str, float]:
 
 
 def write_solver_statistics(resultsdir: pathlib.Path, outpath: pathlib.Path) -> None:
-    """Compute and write per‑solver makespan ratio statistics.
+    """Compute and write per‑solver makespan ratio and runtime statistics.
 
     Produces two sections:
     1) Overall (all runs) — each row is a run; datasets with more runs have more weight.
     2) Dataset‑averaged — median per dataset, then stats across datasets (equal weight per dataset).
+    3) Scheduler Runtime Statistics — min/max/median/mean for runtime across all runs.
     """
     runner = BenchmarkRunner(schedulers={})
     df = runner.load_results(resultsdir)
@@ -127,6 +128,28 @@ def write_solver_statistics(resultsdir: pathlib.Path, outpath: pathlib.Path) -> 
             f.write(f"  p25:      {_format_float(stats['p25'])}\n")
             f.write(f"  p75:      {_format_float(stats['p75'])}\n")
             f.write(f"  max:      {_format_float(stats['max'])}\n")
+        f.write("\n")
+
+        # Section 3: Scheduler Runtime Statistics
+        if "scheduler_runtime_s" in df.columns:
+            f.write("[Scheduler Runtime Statistics (seconds)]\n")
+            for name in ordered:
+                disp = get_scheduler_display_name(name)
+                runtime_series = df.loc[df["scheduler"] == name, "scheduler_runtime_s"]
+                runtime_stats = _compute_series_stats(runtime_series)
+
+                f.write(f"- {disp} ({name})\n")
+                f.write(f"  count:  {_format_float(runtime_stats['count'])}\n")
+                f.write(f"  mean:   {_format_float(runtime_stats['mean'])}\n")
+                f.write(f"  median: {_format_float(runtime_stats['median'])}\n")
+                f.write(f"  std:    {_format_float(runtime_stats['std'])}\n")
+                f.write(f"  min:    {_format_float(runtime_stats['min'])}\n")
+                f.write(f"  p25:    {_format_float(runtime_stats['p25'])}\n")
+                f.write(f"  p75:    {_format_float(runtime_stats['p75'])}\n")
+                f.write(f"  max:    {_format_float(runtime_stats['max'])}\n")
+        else:
+            f.write("[Scheduler Runtime Statistics]\n")
+            f.write("No scheduler runtime data available.\n")
 
         # Done
 

@@ -1,18 +1,19 @@
-"""Fill-in/Split BSP Scheduler with three-phase placement strategy.
+"""Fill-in/Append BSP Scheduler with hole-filling and earliest-finish placement.
 
 This scheduler supports three priority modes:
 - HEFT mode: Uses upward rank for task prioritization (default)
 - CPOP mode: Uses upward + downward rank for task prioritization
 - DS mode: Uses dominantsequence (static upward + dynamic downward rank)
 
-Implements a three-phase placement strategy in strict priority order:
+Implements a two-phase placement strategy in strict priority order:
 1. Fill-in: Try to place tasks in holes of existing supersteps
-2. Append: If dependency-ready time is in last superstep, try appending
-3. Split: Create new superstep or split existing one
+2. Earliest-finish: If no hole available, evaluate two strategies and pick earliest:
+   a. Append to last superstep on each processor
+   b. Create new superstep at end and place on best processor
 """
 
 from dataclasses import dataclass
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 import logging
 from queue import PriorityQueue
 from .base import BSPScheduler
@@ -29,28 +30,35 @@ class PrioritizedTask:
     """Task with priority for queue ordering."""
     priority: float
     task: str
-    
+
     def __post_init__(self):
         # Make priority negative so higher ranks are processed first
         self.priority = -self.priority
 
 
-class FillInSplitBSPScheduler(BSPScheduler):
-    """Fill-in/Split BSP scheduler with three-phase placement strategy.
+@dataclass
+class PlacementCandidate:
+    """Represents a candidate placement for a task."""
+    finish_time: float
+    strategy: str  # "fill-in", "append", or "new"
+    processor: str
+    superstep: Superstep
+
+
+class FillInAppendBSPScheduler(BSPScheduler):
+    """Fill-in/Append BSP scheduler with hole-filling and earliest-finish placement.
 
     This scheduler:
     1. Computes task priority using HEFT (upward rank) or CPOP (upward + downward rank)
     2. Processes tasks in priority order
     3. For each task, tries strategies in order:
        - Phase 1: Fill-in (find holes in existing supersteps)
-       - Phase 2: Append (if would split last superstep, try appending instead)
-       - Phase 3: Split (create/split superstep at dependency-ready time)
-    4. Uses first successful strategy (early exit)
+       - Phase 2: Earliest-finish (evaluate append vs new superstep, pick earliest)
     """
-    
+
     def __init__(self, verbose: bool = False, draw_after_each_step: bool = False,
                  priority_mode: str = "heft", optimize_merging: bool = False):
-        """Initialize the Fill-in/Split BSP scheduler.
+        """Initialize the Fill-in/Append BSP scheduler.
 
         Args:
             verbose: Enable detailed output to console
@@ -62,7 +70,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
         """
         super().__init__()
         self.priority_mode = priority_mode.lower()
-        self.name = "FillInSplit+" + self.priority_mode.capitalize()
+        self.name = "FillInAppend+" + self.priority_mode.capitalize()
         self.verbose = verbose
         self.draw_after_each_step = draw_after_each_step
         self.optimize_merging = optimize_merging
@@ -84,29 +92,28 @@ class FillInSplitBSPScheduler(BSPScheduler):
             'tasks_scheduled': 0,
             'fill_in_placements': 0,
             'append_placements': 0,
-            'split_placements': 0,
+            'new_superstep_placements': 0,
             'supersteps_created': 0,
-            'supersteps_split': 0,
             'supersteps_merged': 0,
             'optimization_eliminations': 0,
             'optimization_iterations': 0
         }
-    
+
     def schedule(self, hardware: BSPHardware, task_graph: nx.DiGraph) -> BSPSchedule:
-        """Schedule tasks using three-phase placement strategy.
-        
+        """Schedule tasks using fill-in and earliest-finish placement strategy.
+
         Args:
             hardware: BSP hardware configuration
             task_graph: Task dependency graph
-            
+
         Returns:
             Optimized BSP schedule
         """
         self._reset_stats()
-        
+
         # Initialize schedule
         schedule = BSPSchedule(hardware, task_graph)
-        
+
         # Compute task priorities based on selected mode
         if self.priority_mode == "heft":
             rank = upward_rank(hardware.network, task_graph)
@@ -137,63 +144,66 @@ class FillInSplitBSPScheduler(BSPScheduler):
 
                 if self.verbose:
                     self._log(f"Task {task} added to initial queue with {self.priority_mode} rank {task_priority}")
-        
+
         # Create initial superstep if needed
         if not schedule.supersteps:
             schedule.add_superstep()
             self.stats['supersteps_created'] = 1
-        
+
         # Process tasks in priority order
         task_num = 0
         while not queue.empty():
             task_item = queue.get()
             task_name = task_item.task
-            
+
             if self.verbose:
                 self._log(f"\n#{task_num}: Processing task {task_name} with {self.priority_mode} rank {rank[task_name]}")
-            
+
             # Try placement strategies in priority order
             placed = False
-            
+
             # Phase 1: Try fill-in strategy
-            processor, superstep = self._try_fill_in(task_name, schedule, hardware, task_graph)
-            if processor is not None:
-                schedule.schedule(task_name, processor, superstep)
+            candidate = self._try_fill_in(task_name, schedule, hardware, task_graph)
+            if candidate is not None:
+                schedule.schedule(task_name, candidate.processor, candidate.superstep)
                 self.stats['fill_in_placements'] += 1
                 placed = True
                 if self.verbose:
-                    self._log(f"  Placed using fill-in strategy on processor {processor}, "
-                               f"superstep {superstep.index}")
-            
-            # Phase 2: Try append strategy (if dependency-ready time is in last superstep)
-            if not placed and False:
-                processor, superstep = self._try_append(task_name, schedule, hardware, task_graph)
-                if processor is not None:
-                    schedule.schedule(task_name, processor, superstep)
-                    self.stats['append_placements'] += 1
-                    placed = True
-                    if self.verbose:
-                        self._log(f"  Placed using append strategy on processor {processor}, "
-                                   f"superstep {superstep.index}")
-            
-            # Phase 3: Use split strategy (always works)
+                    self._log(f"  Placed using fill-in strategy on processor {candidate.processor}, "
+                               f"superstep {candidate.superstep.index}, finish={candidate.finish_time:.2f}")
+
+            # Phase 2: Evaluate append vs new superstep, pick earliest finish
             if not placed:
-                processor, superstep = self._do_split(task_name, schedule, hardware, task_graph)
-                # Schedule the task at the beginning of the new/split superstep
-                schedule.schedule(task_name, processor, superstep, 0) 
-                self.stats['split_placements'] += 1
+                candidate = self._find_earliest_finish_placement(task_name, schedule, hardware, task_graph)
+
+                # If the candidate requires creating a new superstep, do it now
+                if candidate.superstep is None:
+                    candidate.superstep = schedule.add_superstep()
+                    self.stats['supersteps_created'] += 1
+
+                schedule.schedule(task_name, candidate.processor, candidate.superstep)
+
+                if candidate.strategy == "append":
+                    self.stats['append_placements'] += 1
+                    if self.verbose:
+                        self._log(f"  Placed using append strategy on processor {candidate.processor}, "
+                                   f"superstep {candidate.superstep.index}, finish={candidate.finish_time:.2f}")
+                else:  # "new"
+                    self.stats['new_superstep_placements'] += 1
+                    if self.verbose:
+                        self._log(f"  Placed using new superstep strategy on processor {candidate.processor}, "
+                                   f"superstep {candidate.superstep.index}, finish={candidate.finish_time:.2f}")
+
                 placed = True
-                if self.verbose:
-                    self._log(f"  Placed using split strategy on processor {processor}, "
-                               f"superstep {superstep.index}")
-            
-            # FIXME:
-            superstep_idx = superstep.index
-            if superstep_idx > 0 and schedule.merge_supersteps(superstep_idx-1) > 0:
+
+            # Try to merge with previous superstep if beneficial
+            if candidate.superstep.index > 0 and schedule.merge_supersteps(candidate.superstep.index - 1) > 0:
                 self.stats['supersteps_merged'] += 1
-                self._log(f"  Merged supersteps {superstep_idx-1} and {superstep_idx} after placement")
+                if self.verbose:
+                    self._log(f"  Merged supersteps {candidate.superstep.index-1} and {candidate.superstep.index} after placement")
+
             self.stats['tasks_scheduled'] += 1
-            
+
             # Add newly ready successors to queue
             for successor in task_graph.successors(task_name):
                 if all(schedule.task_scheduled(pred) for pred in task_graph.predecessors(successor)):
@@ -223,15 +233,15 @@ class FillInSplitBSPScheduler(BSPScheduler):
                         if self.verbose:
                             mode_str = {"heft": "HEFT", "cpop": "CPOP"}[self.priority_mode]
                             self._log(f"  Task {successor} became ready with {mode_str} rank {rank[successor]}")
-            
+
             # Optionally draw Gantt chart after each step
             if self.draw_after_each_step:
                 draw_bsp_gantt(schedule, title=f"After #{task_num}: Scheduling {task_name}")
             task_num += 1
-        
+
         # Merge supersteps where possible
         merges = schedule.merge_supersteps()
-        self.stats['supersteps_merged'] = merges
+        self.stats['supersteps_merged'] += merges
         if self.verbose and merges > 0:
             self._log(f"\nMerged {merges} superstep(s) to reduce synchronization overhead")
 
@@ -248,33 +258,33 @@ class FillInSplitBSPScheduler(BSPScheduler):
         # Validate the final schedule
         schedule.assert_valid()
         return schedule
-    
+
     def _calculate_task_duration(self, task_name: str, processor: str,
                                 hardware: BSPHardware, task_graph: nx.DiGraph) -> float:
         """Calculate computation duration for a task on a processor.
-        
+
         Args:
             task_name: Task to calculate duration for
             processor: Target processor
             hardware: Hardware configuration
             task_graph: Task dependency graph
-            
+
         Returns:
             Task duration (computation time only)
         """
         task_weight = task_graph.nodes[task_name]['weight']
         processor_speed = hardware.network.nodes[processor]['weight']
         return task_weight / processor_speed
-    
+
     def _calculate_communication_time(self, task_name: str, processor: str,
                                      superstep: Superstep, schedule: BSPSchedule,
                                      hardware: BSPHardware, task_graph: nx.DiGraph) -> float:
         """Calculate communication time for predecessors not on same processor.
-        
+
         Since we don't use task duplication, each predecessor has exactly one instance.
         Communication is needed if the predecessor is on a different processor and in
         a previous superstep.
-        
+
         Args:
             task_name: Task to calculate communication for
             processor: Target processor
@@ -282,261 +292,262 @@ class FillInSplitBSPScheduler(BSPScheduler):
             schedule: Current schedule
             hardware: Hardware configuration
             task_graph: Task dependency graph
-            
+
         Returns:
             Total communication time needed
         """
         comm_time = 0.0
-        
+
         for pred_name in task_graph.predecessors(task_name):
             if not schedule.task_scheduled(pred_name):
                 continue  # Predecessor not scheduled yet
-            
+
             # Get the single instance of the predecessor
             pred_instance = schedule.get_single_instance(pred_name)
-            
+
             # Check if communication is needed
             # No communication needed if:
-            # 1. Predecessor is on same processor AND in same superstep, OR
-            # 2. Predecessor is on same processor AND in earlier superstep
+            # 1. Predecessor is on same processor (regardless of superstep)
             if pred_instance.proc == processor:
                 # Same processor - no communication needed
                 continue
-            
+
             # Different processor - need communication if predecessor is in earlier superstep
             if pred_instance.superstep.index < superstep.index:
                 # Calculate communication time
                 edge_weight = task_graph.edges[(pred_name, task_name)]['weight']
-                
+
                 if hardware.network.has_edge(pred_instance.proc, processor):
                     network_speed = hardware.network.edges[pred_instance.proc, processor]['weight']
                     comm_time = comm_time + edge_weight / network_speed
                 else:
                     # No network connection available
                     return float('inf')
-        
+
         return comm_time
-    
+
     def _try_fill_in(self, task_name: str, schedule: BSPSchedule,
-                    hardware: BSPHardware, task_graph: nx.DiGraph) -> Tuple[Optional[str], Optional[Superstep]]:
+                    hardware: BSPHardware, task_graph: nx.DiGraph) -> Optional[PlacementCandidate]:
         """Try to place task in a hole of an existing superstep.
-        
+
         Args:
             task_name: Task to place
             schedule: Current schedule
             hardware: Hardware configuration
             task_graph: Task dependency graph
-            
+
         Returns:
-            Tuple of (processor, superstep) if successful, (None, None) otherwise
+            PlacementCandidate if successful, None otherwise
         """
-        best_processor = None
-        best_superstep = None
+        best_candidate = None
         best_finish_time = float('inf')
-        
+
         # Check all supersteps for holes
         for superstep in schedule.supersteps:
             for processor in hardware.network.nodes:
                 # Check if dependencies allow scheduling here
                 if not schedule.can_be_scheduled_in(task_name, superstep, processor):
                     continue
-                
+
                 # Calculate task duration
                 task_duration = self._calculate_task_duration(task_name, processor, hardware, task_graph)
-                
+
                 # Current end time of processor in this superstep
                 proc_end_time = superstep.compute_phase_start(processor) + superstep.compute_time(processor)
-                
+
                 # Would the task fit in a hole?
                 task_finish_time = proc_end_time + task_duration
                 superstep_end_time = superstep.end_time
-                
+
                 # Check if there's a hole (task fits without extending superstep)
                 if task_finish_time <= superstep_end_time * 1.0001:  # Small tolerance
                     if task_finish_time < best_finish_time:
                         best_finish_time = task_finish_time
-                        best_processor = processor
-                        best_superstep = superstep
-                        
+                        best_candidate = PlacementCandidate(
+                            finish_time=task_finish_time,
+                            strategy="fill-in",
+                            processor=processor,
+                            superstep=superstep
+                        )
+
                         if self.verbose:
                             hole_size = superstep_end_time - proc_end_time
                             self._log(f"    Found fill-in opportunity: superstep {superstep.index}, "
-                                       f"proc {processor}, hole_size={hole_size:.2f}")
-        
-        return best_processor, best_superstep
-    
-    def _try_append(self, task_name: str, schedule: BSPSchedule,
-                   hardware: BSPHardware, task_graph: nx.DiGraph) -> Tuple[Optional[str], Optional[Superstep]]:
-        """Try to append task to last superstep if dependency-ready time allows.
-        
+                                       f"proc {processor}, hole_size={hole_size:.2f}, finish={task_finish_time:.2f}")
+
+        return best_candidate
+
+    def _find_earliest_finish_placement(self, task_name: str, schedule: BSPSchedule,
+                                       hardware: BSPHardware, task_graph: nx.DiGraph) -> PlacementCandidate:
+        """Find placement with earliest finish time by evaluating append and new superstep strategies.
+
         Args:
             task_name: Task to place
             schedule: Current schedule
             hardware: Hardware configuration
             task_graph: Task dependency graph
-            
+
         Returns:
-            Tuple of (processor, superstep) if successful, (None, None) otherwise
+            PlacementCandidate with earliest finish time
         """
-        if not schedule.supersteps:
-            return None, None
-        
-        last_superstep = schedule.supersteps[-1]
-        best_processor = None
-        best_finish_time = float('inf')
-        
-        # Get dependency-ready time (same for all processors)
-        dep_ready_time = self._get_dependency_ready_time(task_name, schedule, task_graph)
-        
-        if dep_ready_time == float('inf'):
-            return None, None
-        
-        # Check which superstep this time falls into
-        superstep_at_time = schedule.get_superstep_at_time(dep_ready_time)
-        
-        # Only proceed if dependency-ready time is in last superstep
-        if superstep_at_time != last_superstep:
-            return None, None
-        
-        # For each processor, try to append to last superstep
-        for processor in hardware.network.nodes:
-            # Check if we can schedule in last superstep
-            if schedule.can_be_scheduled_in(task_name, last_superstep, processor):
-                # Calculate task duration
-                task_duration = self._calculate_task_duration(task_name, processor, hardware, task_graph)
-                
-                # Calculate finish time
-                proc_end_time = last_superstep.compute_time(processor)
-                task_finish_relative = proc_end_time + task_duration
-                task_finish_absolute = last_superstep.compute_phase_start + task_finish_relative
-                
-                if task_finish_absolute < best_finish_time:
-                    best_finish_time = task_finish_absolute
-                    best_processor = processor
-                    
-                    if self.verbose:
-                        self._log(f"    Found append opportunity: last superstep, "
-                                   f"proc {processor}, finish={task_finish_absolute:.2f}")
-        
-        if best_processor is not None:
-            return best_processor, last_superstep
-        
-        return None, None
-    
-    def _do_split(self, task_name: str, schedule: BSPSchedule,
-                 hardware: BSPHardware, task_graph: nx.DiGraph) -> Tuple[str, Superstep]:
-        """Place task using split strategy (create/split superstep).
-        
-        This method:
-        1. Gets the dependency-ready time
-        2. Creates/splits superstep at that time
-        3. Evaluates all processors on this new superstep
-        4. Places task on best processor
-        
+        candidates: List[PlacementCandidate] = []
+
+        # Strategy A: Append to last superstep on each processor
+        candidates.extend(self._evaluate_append_strategy(task_name, schedule, hardware, task_graph))
+
+        # Strategy B: Create new superstep at end
+        candidates.extend(self._evaluate_new_superstep_strategy(task_name, schedule, hardware, task_graph))
+
+        # Select candidate with earliest finish time
+        if not candidates:
+            raise ValueError(f"No valid placement found for task {task_name}")
+
+        best_candidate = min(candidates, key=lambda c: c.finish_time)
+        return best_candidate
+
+    def _evaluate_append_strategy(self, task_name: str, schedule: BSPSchedule,
+                                  hardware: BSPHardware, task_graph: nx.DiGraph) -> List[PlacementCandidate]:
+        """Evaluate appending task to last superstep on each processor.
+
         Args:
             task_name: Task to place
             schedule: Current schedule
             hardware: Hardware configuration
             task_graph: Task dependency graph
-            
+
         Returns:
-            Tuple of (processor, superstep) for placement
+            List of PlacementCandidates for append strategy
         """
-        # Step 1: Get the dependency-ready time (same for all processors)
-        dep_ready_time = self._get_dependency_ready_time(task_name, schedule, task_graph)
-        
-        if dep_ready_time == float('inf'):
-            raise ValueError(f"Could not find valid dependency-ready time for task {task_name}")
-        
-        if self.verbose:
-            self._log(f"    Dependency-ready time: {dep_ready_time:.2f}")
-        
-        # Step 2: Create/split superstep at the dependency-ready time (only once!)
-        original_count = len(schedule.supersteps)
-        superstep = schedule.get_or_create_superstep_at_time(dep_ready_time)
-        
-        # Update statistics for superstep creation/splitting
-        if len(schedule.supersteps) > original_count:
-            if superstep.index == len(schedule.supersteps) - 1:
-                self.stats['supersteps_created'] += 1
-                if self.verbose:
-                    self._log(f"    Created new superstep {superstep.index}")
-            else:
-                self.stats['supersteps_split'] += 1
-                if self.verbose:
-                    self._log(f"    Split to create superstep {superstep.index}")
-        
-        # Step 3: Evaluate each processor for best placement
-        best_processor = None
-        best_finish_time = float('inf')
-        
+        candidates = []
+
+        # For each processor, find the last superstep that contains tasks on that processor
         for processor in hardware.network.nodes:
-            # Make sure we can schedule in this superstep on this processor
-            if not schedule.can_be_scheduled_in(task_name, superstep, processor):
-                raise ValueError(f"Cannot schedule task {task_name} on processor {processor} in superstep {superstep.index} after split")
-            
+            last_superstep = None
+
+            # Find last superstep with tasks on this processor
+            for superstep in reversed(schedule.supersteps):
+                if processor in superstep.tasks and len(superstep.tasks[processor]) > 0:
+                    last_superstep = superstep
+                    break
+
+            # If processor has no tasks yet, use the first superstep
+            if last_superstep is None:
+                last_superstep = schedule.supersteps[0]
+
+            # Check if we can schedule in this superstep
+            if not schedule.can_be_scheduled_in(task_name, last_superstep, processor):
+                continue
+
             # Calculate task duration including communication
-            task_duration = self._calculate_task_duration(task_name, processor, hardware, task_graph) + \
-                            self._calculate_communication_time(task_name, processor, superstep, schedule, hardware, task_graph)
-            
-            # Calculate when task would approximately finish
-            task_finish_absolute = superstep.compute_phase_start(processor) + superstep.compute_time(processor) + task_duration
-            
-            if task_finish_absolute < best_finish_time:
-                best_finish_time = task_finish_absolute
-                best_processor = processor
-                
-                if self.verbose:
-                    self._log(f"    Processor {processor}: finish={task_finish_absolute:.2f}")
-        
-        if self.verbose:
-            self._log(f"    Selected processor {best_processor} with finish time {best_finish_time:.2f}")
-        
-        return best_processor, superstep
-    
-    def _get_dependency_ready_time(self, task_name: str,
-                                  schedule: BSPSchedule, task_graph: nx.DiGraph) -> float:
-        """Calculate the exact time when all dependencies are ready for a task.
-        
-        Since we don't use task duplication, each predecessor has exactly one instance.
-        The ready time is the latest end time among all predecessors.
-        
+            task_duration = self._calculate_task_duration(task_name, processor, hardware, task_graph)
+            comm_time = self._calculate_communication_time(task_name, processor, last_superstep,
+                                                          schedule, hardware, task_graph)
+
+            if comm_time == float('inf'):
+                continue  # No network connection
+
+            # Calculate finish time if appended
+            proc_compute_end = last_superstep.compute_phase_start(processor) + last_superstep.compute_time(processor)
+            task_finish_time = proc_compute_end + task_duration
+
+            candidates.append(PlacementCandidate(
+                finish_time=task_finish_time,
+                strategy="append",
+                processor=processor,
+                superstep=last_superstep
+            ))
+
+            if self.verbose:
+                self._log(f"    Append strategy: proc {processor}, superstep {last_superstep.index}, "
+                           f"finish={task_finish_time:.2f}")
+
+        return candidates
+
+    def _evaluate_new_superstep_strategy(self, task_name: str, schedule: BSPSchedule,
+                                        hardware: BSPHardware, task_graph: nx.DiGraph) -> List[PlacementCandidate]:
+        """Evaluate creating new superstep at end and placing on each processor.
+
         Args:
-            task_name: Task to check
+            task_name: Task to place
             schedule: Current schedule
+            hardware: Hardware configuration
             task_graph: Task dependency graph
-            
+
         Returns:
-            Exact time when all dependencies have completed
+            List of PlacementCandidates for new superstep strategy
         """
-        ready_time = 0.0
-        
-        for pred_name in task_graph.predecessors(task_name):
-            if not schedule.task_scheduled(pred_name):
-                return float('inf')
-            
-            # Get the single instance of the predecessor
-            pred_instance = schedule.get_single_instance(pred_name)
-            
-            # Dependency is ready exactly when the predecessor task completes
-            ready_time = max(ready_time, pred_instance.end)
-        
-        return ready_time
+        candidates = []
+
+        # Calculate what the new superstep's timing would be
+        # (without actually creating it yet)
+        new_superstep_start = schedule.makespan if schedule.supersteps else 0.0
+
+        # Evaluate each processor in the hypothetical new superstep
+        for processor in hardware.network.nodes:
+            # Check if dependencies are satisfied (all must be scheduled already)
+            can_schedule = True
+            for pred_name in task_graph.predecessors(task_name):
+                if not schedule.task_scheduled(pred_name):
+                    can_schedule = False
+                    break
+
+            if not can_schedule:
+                continue
+
+            # Calculate task duration
+            task_duration = self._calculate_task_duration(task_name, processor, hardware, task_graph)
+
+            # Calculate communication time
+            comm_time = 0.0
+            for pred_name in task_graph.predecessors(task_name):
+                pred_instance = schedule.get_single_instance(pred_name)
+                if pred_instance.proc != processor:
+                    edge_weight = task_graph.edges[(pred_name, task_name)]['weight']
+                    if hardware.network.has_edge(pred_instance.proc, processor):
+                        network_speed = hardware.network.edges[pred_instance.proc, processor]['weight']
+                        comm_time += edge_weight / network_speed
+                    else:
+                        comm_time = float('inf')
+                        break
+
+            if comm_time == float('inf'):
+                continue  # No network connection
+
+            # Calculate finish time in new superstep
+            # New superstep starts with sync + exchange + computation
+            task_finish_time = (new_superstep_start +
+                              hardware.sync_time +
+                              comm_time +
+                              task_duration)
+
+            # Create a placeholder that we'll replace with actual superstep if chosen
+            # We use a marker object to indicate this needs to be created
+            candidates.append(PlacementCandidate(
+                finish_time=task_finish_time,
+                strategy="new",
+                processor=processor,
+                superstep=None  # Will create when this candidate is chosen
+            ))
+
+            if self.verbose:
+                self._log(f"    New superstep strategy: proc {processor}, "
+                           f"finish={task_finish_time:.2f}")
+
+        return candidates
 
     def print_stats(self):
         """Print scheduling statistics."""
         print("\n" + "="*50)
         mode_str = {"heft": "HEFT", "cpop": "CPOP", "ds": "DominantSequence"}[self.priority_mode]
-        print(f"Fill-in/Split BSP Scheduler Statistics ({mode_str} priority mode)")
+        print(f"Fill-in/Append BSP Scheduler Statistics ({mode_str} priority mode)")
         print("="*50)
         print(f"Tasks scheduled:         {self.stats['tasks_scheduled']}")
         print(f"Placement strategies:")
         print(f"  - Fill-in:            {self.stats['fill_in_placements']}")
         print(f"  - Append:             {self.stats['append_placements']}")
-        print(f"  - Split:              {self.stats['split_placements']}")
+        print(f"  - New superstep:      {self.stats['new_superstep_placements']}")
         print(f"Superstep operations:")
         print(f"  - Created:            {self.stats['supersteps_created']}")
-        print(f"  - Split:              {self.stats['supersteps_split']}")
         print(f"  - Merged:             {self.stats['supersteps_merged']}")
         if self.optimize_merging:
             print(f"Optimization phase:")

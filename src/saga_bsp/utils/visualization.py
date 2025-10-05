@@ -7,6 +7,32 @@ from matplotlib import rc_context
 from ..schedule import BSPSchedule
 
 
+def natural_sort_key(processor_name):
+    """Generate a sort key for natural ordering of processor names.
+
+    Handles names ending in digits (e.g., tile_0, proc123, cpu_99) by extracting
+    the numeric suffix for proper numerical sorting instead of lexicographic sorting.
+
+    Args:
+        processor_name: Processor name (string or hashable)
+
+    Returns:
+        Sort key suitable for use with sorted() - a tuple of (prefix, number)
+        or the original string if no numeric suffix is found
+    """
+    import re
+    name_str = str(processor_name)
+
+    # Match any string ending in one or more digits
+    match = re.match(r'^(.*?)(\d+)$', name_str)
+    if match:
+        prefix, number = match.groups()
+        return (prefix, int(number))
+
+    # No numeric suffix, return as-is for lexicographic sorting
+    return (name_str, 0)
+
+
 def draw_bsp_gantt(bsp_schedule: BSPSchedule, 
                    show_phases: bool = True,
                    use_latex: bool = False,
@@ -46,7 +72,7 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
         all_processors = set()
         for superstep in bsp_schedule.supersteps:
             all_processors.update(superstep.tasks.keys())
-        all_processors = sorted(list(all_processors))
+        all_processors = sorted(list(all_processors), key=natural_sort_key)
         
         if not all_processors:
             axis.text(0.5, 0.5, 'Empty Schedule', ha='center', va='center', transform=axis.transAxes)
@@ -121,6 +147,7 @@ def draw_bsp_gantt(bsp_schedule: BSPSchedule,
                 # Draw individual tasks - optimize for many small tasks
                 total_tasks = sum(len(tasks) for tasks in superstep.tasks.values())
                 use_raster = total_tasks > 500 or len(tasks) > 50  # Use raster for dense visualizations
+                use_raster = False  # Disable raster for now
 
                 if use_raster and len(tasks) > 1:
                     # Use imshow for dense task visualization to avoid artifacts
@@ -314,11 +341,11 @@ def draw_tile_activity(bsp_schedule: BSPSchedule,
     all_processors = set()
     for superstep in bsp_schedule.supersteps:
         all_processors.update(superstep.tasks.keys())
-    
+
     if tile_subset:
         processors = [p for p in tile_subset if p in all_processors]
     else:
-        processors = sorted(list(all_processors))
+        processors = sorted(list(all_processors), key=natural_sort_key)
     
     if not processors:
         axis.text(0.5, 0.5, 'No processors found', ha='center', va='center', transform=axis.transAxes)
@@ -447,7 +474,7 @@ def draw_processor_comm_breakdown(bsp_schedule: BSPSchedule,
     all_processors = set()
     for ss in supersteps:
         all_processors.update(ss.tasks.keys())
-    processors = sorted(list(all_processors))
+    processors = sorted(list(all_processors), key=natural_sort_key)
 
     if not processors:
         fig, ax = plt.subplots(figsize=figsize)
@@ -544,7 +571,7 @@ def draw_busy_comm_gantt(schedule: Dict[Hashable, List],
             _, axis = plt.subplots(figsize=figsize)
             
         # Get all processors
-        processors = sorted(schedule.keys())
+        processors = sorted(schedule.keys(), key=natural_sort_key)
         
         if not processors:
             axis.text(0.5, 0.5, 'Empty Schedule', ha='center', va='center', transform=axis.transAxes)
@@ -556,7 +583,8 @@ def draw_busy_comm_gantt(schedule: Dict[Hashable, List],
         # Optimize for many tasks
         total_tasks = sum(len(tasks) for tasks in schedule.values())
         use_raster = total_tasks > 500  # Use raster for very dense visualizations
-
+        use_raster = False  # Disable raster for now
+    
         # Draw tasks
         for proc, tasks in schedule.items():
             y = y_pos[proc]
