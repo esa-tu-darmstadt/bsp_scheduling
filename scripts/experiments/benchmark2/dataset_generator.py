@@ -124,6 +124,7 @@ def generate_wfcommons_dataset(cache_dir: pathlib.Path, recipe_name: str,
 
                 # Apply random CCR adjustment
                 target_ccr = 0.1
+                # target_ccr = np.random.uniform(0.01, 0.2)
                 adjust_task_graph_to_ccr(task_graph, bsp_hardware.network, target_ccr)
 
                 # Calculate final CCR for metadata
@@ -455,6 +456,7 @@ def generate_primitives_dataset(cache_dir: pathlib.Path, graph_type: str,
 
                 # Apply random CCR adjustment
                 target_ccr = 0.1
+                # target_ccr = np.random.uniform(0.01, 0.2)
                 adjust_task_graph_to_ccr(task_graph, bsp_hardware.network, target_ccr)
 
                 # Calculate final CCR for metadata

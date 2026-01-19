@@ -41,10 +41,10 @@ def calculate_ccr(task_graph: nx.DiGraph, network: nx.Graph) -> float:
     avg_data_size = np.mean(edge_data_weights)
     avg_link_speed = np.mean(network_edge_weights)
     
-    total_computation_time = avg_task_cost / avg_processor_speed
-    total_communication_time = avg_data_size / avg_link_speed
+    mean_computation_time = avg_task_cost / avg_processor_speed
+    mean_communication_time = avg_data_size / avg_link_speed
     
-    ccr = total_communication_time / total_computation_time if total_computation_time > 0 else 0.0
+    ccr = mean_communication_time / mean_computation_time if mean_computation_time > 0 else 0.0
     
     return ccr
 
@@ -100,6 +100,47 @@ def generate_ccr_variants(task_graph: nx.DiGraph, network: nx.Graph,
         variants.append((graph_copy, target_ccr))
 
     return variants
+
+
+def calculate_avg_computation_time(task_graph: nx.DiGraph, network: nx.Graph) -> float:
+    """Calculate the average computation time for tasks in a graph on given hardware.
+
+    Args:
+        task_graph: Task graph with node weights (computation work)
+        network: Network graph with node weights (processing speed)
+
+    Returns:
+        Average computation time per task (in same time units as weight/speed ratio)
+    """
+    if len(task_graph.nodes()) == 0:
+        return 0.0
+
+    task_weights = [task_graph.nodes[node].get('weight', 1.0) for node in task_graph.nodes()]
+    network_node_weights = [network.nodes[node].get('weight', 1.0) for node in network.nodes()]
+
+    avg_task_weight = np.mean(task_weights)
+    avg_processor_speed = np.mean(network_node_weights)
+
+    return avg_task_weight / avg_processor_speed
+
+
+def calculate_sync_time(task_graph: nx.DiGraph, network: nx.Graph, sync_ratio: float) -> float:
+    """Calculate sync time as a ratio of average computation time.
+
+    This provides a hardware-aware way to set sync_time for BSPHardware,
+    where sync_ratio=1.0 means sync takes as long as one average task.
+
+    Args:
+        task_graph: Task graph with node weights (computation work)
+        network: Network graph with node weights (processing speed)
+        sync_ratio: Sync time as multiple of avg computation time
+                   (e.g., 0.1 = 10% of avg task runtime, 1.0 = same as avg task)
+
+    Returns:
+        Sync time in the same units as computation time
+    """
+    avg_computation_time = calculate_avg_computation_time(task_graph, network)
+    return avg_computation_time * sync_ratio
 
 
 def get_ccr_statistics(task_graph: nx.DiGraph, network: nx.Graph) -> dict:
