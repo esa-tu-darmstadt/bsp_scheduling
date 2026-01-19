@@ -9,12 +9,13 @@ from typing import List, Dict, Optional
 import logging
 
 # Import optimized delay model schedulers (replaces slow SAGA schedulers)
+from saga_bsp import schedulers
 from saga_bsp.misc.saga_scheduler_wrapper import preprocess_task_graph
 from saga_bsp.schedulers.delaymodel import HeftScheduler
 
 # Import BSP schedulers and utilities
 from saga_bsp.misc.heft_busy_communication import HeftBusyCommScheduler
-from saga_bsp.schedulers import FillInSplitBSPScheduler, BCSHScheduler
+from saga_bsp.schedulers import FillInSplitBSPScheduler, BCSHScheduler, HDaggScheduler
 from saga_bsp import AsyncToBSPScheduler
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,9 @@ SCHEDULER_ORDER = [
     "FillInSplitBSPScheduler-HEFT-Merge",
     "FillInSplitBSPScheduler-CPoP",
     "FillInSplitBSPScheduler-CPoP-Merge",
+    "HDaggScheduler-0.01",
+    "HDaggScheduler-0.1",
+    "HDaggScheduler-0.5",
     "BCSHScheduler-NoEFT",
     "BCSHScheduler-EFT"
 ]
@@ -129,6 +133,9 @@ SCHEDULER_RENAMES = {
     "FillInSplitBSPScheduler-CPoP": "BALS Combined",
     "FillInSplitBSPScheduler-HEFT-Merge": "BALS Upw. + Elim.",
     "FillInSplitBSPScheduler-CPoP-Merge": "BALS Comb. + Elim.",
+    "HDaggScheduler-0.01": "HDagg (ε=0.01)",
+    "HDaggScheduler-0.1": "HDagg (ε=0.1)",
+    "HDaggScheduler-0.5": "HDagg (ε=0.5)",
     "BCSHScheduler-NoEFT": "BCSH (LDSH)",
     "BCSHScheduler-EFT": "BCSH (EFT)"
 }
@@ -187,6 +194,18 @@ def create_bsp_schedulers() -> Dict[str, object]:
     
     schedulers["FillInSplitBSPScheduler-CPoP-Merge"] = UnifiedSchedulerWrapper(
         FillInSplitBSPScheduler(priority_mode='cpop', optimize_merging=True)
+    )
+    
+    schedulers["HDaggScheduler-0.01"] = UnifiedSchedulerWrapper(
+        HDaggScheduler(epsilon=0.01)
+    )
+    
+    schedulers["HDaggScheduler-0.1"] = UnifiedSchedulerWrapper(
+        HDaggScheduler(epsilon=0.1)
+    )
+        
+    schedulers["HDaggScheduler-0.5"] = UnifiedSchedulerWrapper(
+        HDaggScheduler(epsilon=0.5)
     )
 
     schedulers["BCSHScheduler-NoEFT"] = UnifiedSchedulerWrapper(

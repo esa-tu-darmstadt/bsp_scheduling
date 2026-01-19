@@ -304,7 +304,7 @@ class HeatmapVisualizer:
         return data
 
     def _create_makespan_ratio_heatmap(self, data: pd.DataFrame, outputdir: pathlib.Path,
-                                     upper_threshold: float = 5.0, figsize: tuple = (7.16, 5), label_textsize = 9) -> None:
+                                     upper_threshold: float = 4.0, figsize: tuple = (7.16, 5), label_textsize = 9) -> None:
         """Create heatmap showing all data variations as gradients within cells using imshow."""
         import numpy as np
         from matplotlib.patches import Rectangle

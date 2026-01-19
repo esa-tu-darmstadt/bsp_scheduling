@@ -49,6 +49,7 @@ def run_single_scheduler_task(scheduler_name, scheduler, dataset_item, task_grap
             'makespan': makespan,
             'scheduler_runtime_s': scheduler_runtime_s,
             'task_graph_idx': task_graph_idx,
+            'dataset_name': dataset_name,
             'target_ccr': dataset_item.metadata.get('target_ccr'),
             'actual_ccr': dataset_item.metadata.get('actual_ccr'),
             'sync_time': dataset_item.metadata.get('sync_time'),
@@ -259,6 +260,10 @@ class BenchmarkRunner:
                           visualization_dir: Optional[pathlib.Path] = None) -> None:
         """Run benchmarks on all datasets.
 
+        This method parallelizes across ALL datasets and schedulers globally,
+        rather than per-dataset. This ensures better CPU utilization when some
+        schedulers are faster than others.
+
         Args:
             datadir: Directory containing cached datasets
             resultsdir: Directory to store results
@@ -300,67 +305,191 @@ class BenchmarkRunner:
 
         # Clear console before starting
         self.console.clear()
-        self.console.print(f"[bold green]🚀 Starting benchmark on {len(available_datasets)} datasets")
+        self.console.print(f"[bold green]Starting benchmark on {len(available_datasets)} datasets")
         self.console.print(f"[cyan]Datasets: {[name for name, _ in available_datasets]}")
         self.console.print()
 
-        # Run benchmarks for each dataset with overall progress tracking
+        # Step 1: Load all datasets and collect all tasks globally
+        logger.info("Loading all datasets...")
+        all_tasks = []  # List of (scheduler_name, scheduler, dataset_item, task_graph_idx, dataset_name, visualization_dir)
+        dataset_info = {}  # dataset_name -> (savepath, num_items) for result saving
+
+        for dataset_key, dataset_file in available_datasets:
+            savepath = resultsdir / f"{dataset_key}.csv"
+            if savepath.exists() and not overwrite:
+                logger.debug(f"Results for {dataset_key} already exist. Skipping.")
+                continue
+
+            try:
+                dataset_items, dataset_metadata = load_dataset(dataset_file)
+
+                if not dataset_items:
+                    logger.warning(f"No items in dataset {dataset_key}, skipping")
+                    continue
+
+                # Limit number of dataset items for benchmarking
+                if max_instances > 0 and len(dataset_items) > max_instances:
+                    dataset_items = dataset_items[:max_instances]
+                    logger.debug(f"Limited to {max_instances} instances for {dataset_key}")
+
+                # Use display name from metadata if available, fallback to dataset_key
+                display_name = getattr(dataset_metadata, 'dataset_name', dataset_key)
+
+                # Store dataset info for later result saving
+                dataset_info[display_name] = {
+                    'savepath': savepath,
+                    'num_items': len(dataset_items)
+                }
+
+                # Create tasks for all scheduler-dataset_item combinations
+                for i, dataset_item in enumerate(dataset_items):
+                    for scheduler_name, scheduler in self.schedulers.items():
+                        all_tasks.append((scheduler_name, scheduler, dataset_item, i, display_name, visualization_dir))
+
+            except Exception as e:
+                logger.error(f"Failed to load dataset {dataset_key}: {e}")
+
+        if not all_tasks:
+            logger.warning("No tasks to run")
+            return
+
+        logger.info(f"Collected {len(all_tasks)} total tasks across {len(dataset_info)} datasets")
+
+        # Step 2: Run all tasks in parallel globally
+        all_results = self._run_all_tasks_globally(all_tasks, num_jobs, dataset_info)
+
+        # Step 3: Group results by dataset and save
+        self._save_results_by_dataset(all_results, dataset_info, resultsdir)
+
+        # Final completion message
+        self.console.print()
+        self.console.print(f"[bold green]Benchmark completed! Processed {len(dataset_info)} datasets with {len(all_tasks)} total tasks.")
+        self.console.print()
+
+    def _run_all_tasks_globally(self, all_tasks: List, num_jobs: int, dataset_info: Dict) -> List:
+        """Run all tasks globally with progress tracking per scheduler."""
+        # Group tasks by scheduler for progress tracking
+        scheduler_names = sorted(set(task[0] for task in all_tasks))
+        total_tasks = len(all_tasks)
+        results = []
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[bold cyan]{task.description}", justify="left"),
-            BarColumn(bar_width=None),  # Auto-size bar to fit console
+            BarColumn(bar_width=None),
             TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
             TextColumn("({task.completed}/{task.total})"),
             TimeElapsedColumn(),
             console=self.console,
             transient=False,
-            refresh_per_second=4,  # Slower refresh to work better with logging
-            expand=True  # Allow logging messages to appear above progress bars
+            refresh_per_second=4,
+            expand=True
         ) as progress:
 
-            dataset_progress = progress.add_task(
-                f"Processing Datasets",
-                total=len(available_datasets)
-            )
+            # Overall progress
+            overall_task = progress.add_task("Overall Progress", total=total_tasks)
 
-            for dataset_idx, (dataset_key, dataset_file) in enumerate(available_datasets):
-                try:
-                    # Update progress description to show current dataset
-                    progress.update(dataset_progress,
-                                    description=f"Processing Datasets - Current: {dataset_key}")
+            # Per-scheduler progress
+            scheduler_progress = {}
+            for scheduler_name in scheduler_names:
+                count = sum(1 for t in all_tasks if t[0] == scheduler_name)
+                scheduler_progress[scheduler_name] = progress.add_task(
+                    f"  {scheduler_name}",
+                    total=count
+                )
 
-                    # Load dataset
-                    dataset_items, dataset_metadata = load_dataset(dataset_file)
+            if num_jobs == 1:
+                # Sequential execution for debugging
+                for task in all_tasks:
+                    scheduler_name = task[0]
+                    try:
+                        result = run_single_scheduler_task(*task)
+                        results.append(result)
+                    except Exception as e:
+                        logger.warning(f"Task failed: {e}")
+                        results.append(None)
 
-                    if not dataset_items:
-                        logger.warning(f"No items in dataset {dataset_key}, skipping")
-                        progress.advance(dataset_progress)
-                        continue
+                    progress.advance(scheduler_progress[scheduler_name])
+                    progress.advance(overall_task)
+            else:
+                # Parallel execution across ALL tasks globally
+                with ProcessPoolExecutor(max_workers=num_jobs) as executor:
+                    future_to_task = {
+                        executor.submit(run_single_scheduler_task, *task): task
+                        for task in all_tasks
+                    }
 
-                    # Use display name from metadata if available, fallback to dataset_key
-                    display_name = getattr(dataset_metadata, 'dataset_name', dataset_key)
+                    for future in as_completed(future_to_task):
+                        task = future_to_task[future]
+                        scheduler_name = task[0]
 
-                    # Run benchmark with shared progress context
-                    self.run_dataset_benchmark(
-                        dataset_name=display_name,
-                        dataset_items=dataset_items,
-                        resultsdir=resultsdir,
-                        num_jobs=num_jobs,
-                        overwrite=overwrite,
-                        max_instances=max_instances,
-                        visualization_dir=visualization_dir,
-                        progress_context=progress
-                    )
+                        try:
+                            result = future.result()
+                            results.append(result)
+                        except Exception as e:
+                            logger.warning(f"Task failed: {e}")
+                            results.append(None)
 
-                except Exception as e:
-                    logger.error(f"Failed to run benchmark on {dataset_key}: {e}")
+                        progress.advance(scheduler_progress[scheduler_name])
+                        progress.advance(overall_task)
 
-                progress.advance(dataset_progress)
+        return results
 
-        # Final completion message
-        self.console.print()
-        self.console.print(f"[bold green]✅ Benchmark completed! Processed {len(available_datasets)} datasets.")
-        self.console.print()
+    def _save_results_by_dataset(self, all_results: List, dataset_info: Dict, resultsdir: pathlib.Path) -> None:
+        """Group results by dataset and save to CSV files."""
+        # Filter out None results
+        valid_results = [r for r in all_results if r is not None]
+
+        # Group results by dataset
+        results_by_dataset = {}
+        for result in valid_results:
+            dataset_name = result.get('dataset_name')
+            if dataset_name not in results_by_dataset:
+                results_by_dataset[dataset_name] = []
+            results_by_dataset[dataset_name].append(result)
+
+        # Save results for each dataset
+        for dataset_name, info in dataset_info.items():
+            dataset_results = results_by_dataset.get(dataset_name, [])
+
+            if not dataset_results:
+                logger.warning(f"No results for dataset {dataset_name}")
+                continue
+
+            # Calculate ratios relative to best scheduler for each task graph
+            final_results = []
+            task_graph_indices = set(r['task_graph_idx'] for r in dataset_results)
+
+            for task_graph_idx in task_graph_indices:
+                task_results = [r for r in dataset_results if r['task_graph_idx'] == task_graph_idx]
+
+                if not task_results:
+                    continue
+
+                makespans = {r['scheduler_name']: r['makespan'] for r in task_results}
+                best_makespan = min(makespans.values())
+
+                for result in task_results:
+                    ratio = result['makespan'] / best_makespan
+                    final_results.append({
+                        'scheduler': result['scheduler_name'],
+                        'makespan': result['makespan'],
+                        'makespan_ratio': ratio,
+                        'scheduler_runtime_s': result['scheduler_runtime_s'],
+                        'task_graph_idx': result['task_graph_idx'],
+                        'target_ccr': result.get('target_ccr'),
+                        'actual_ccr': result.get('actual_ccr'),
+                        'sync_time': result.get('sync_time'),
+                        'num_tiles': result.get('num_tiles'),
+                        'source_type': result.get('source_type')
+                    })
+
+            # Save to CSV
+            df_comp = pd.DataFrame(final_results)
+            savepath = info['savepath']
+            savepath.parent.mkdir(exist_ok=True, parents=True)
+            df_comp.to_csv(savepath)
+            logger.info(f"Saved results to {savepath}")
 
     def load_results(self, resultsdir: pathlib.Path, glob: str = "*.csv") -> pd.DataFrame:
         """Load benchmark results from CSV files.
