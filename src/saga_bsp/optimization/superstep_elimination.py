@@ -99,38 +99,33 @@ def optimize_superstep_elimination(schedule: BSPSchedule, verbose: bool = False)
             # Create a trial schedule with the elimination
             trial_schedule = current_schedule.copy()
 
+            # Use batch mode to defer start_time propagation during repairs
+            trial_schedule.begin_batch_update()
             try:
-                # Use batch mode to defer start_time propagation during repairs
-                trial_schedule.begin_batch_update()
-                try:
-                    # Perform elimination and repair on trial schedule
-                    _eliminate_and_repair_superstep(trial_schedule, superstep_idx)
-                finally:
-                    trial_schedule.end_batch_update()
+                # Perform elimination and repair on trial schedule
+                _eliminate_and_repair_superstep(trial_schedule, superstep_idx)
+            finally:
+                trial_schedule.end_batch_update()
 
-                # Calculate new makespan
-                new_makespan = trial_schedule.makespan
-                benefit = current_makespan - new_makespan
+            # Calculate new makespan
+            new_makespan = trial_schedule.makespan
+            benefit = current_makespan - new_makespan
 
-                if benefit > 0:
-                    # Beneficial elimination - keep it
-                    if verbose:
-                        superstep_size = current_schedule.supersteps[superstep_idx].total_time
-                        logger.info(f"    Eliminated superstep {superstep_idx} "
-                                 f"(size: {superstep_size:.2f}, benefit: {benefit:.2f})")
-                    current_schedule = trial_schedule
-                    total_eliminations += 1
-                    eliminated_in_this_iteration = True
-                    break  # Restart with fresh sorting
-                else:
-                    # Not beneficial - discard trial and try next superstep
-                    if verbose:
-                        logger.debug(f"    Superstep {superstep_idx} elimination not beneficial "
-                                   f"(benefit: {benefit:.2f}), trying next")
-
-            except Exception as e:
-                # Elimination failed - discard trial and try next superstep
-                logger.warning(f"    Superstep {superstep_idx} elimination failed: {e}, trying next")
+            if benefit > 0:
+                # Beneficial elimination - keep it
+                if verbose:
+                    superstep_size = current_schedule.supersteps[superstep_idx].total_time
+                    logger.info(f"    Eliminated superstep {superstep_idx} "
+                             f"(size: {superstep_size:.2f}, benefit: {benefit:.2f})")
+                current_schedule = trial_schedule
+                total_eliminations += 1
+                eliminated_in_this_iteration = True
+                break  # Restart with fresh sorting
+            else:
+                # Not beneficial - discard trial and try next superstep
+                if verbose:
+                    logger.debug(f"    Superstep {superstep_idx} elimination not beneficial "
+                               f"(benefit: {benefit:.2f}), trying next")
 
         # If no elimination was performed in this iteration, we're done
         if not eliminated_in_this_iteration:
@@ -178,9 +173,20 @@ def _eliminate_and_repair_superstep(schedule: BSPSchedule, superstep_idx: int):
         if 'index' in schedule.supersteps[i].__dict__:
             del schedule.supersteps[i].__dict__['index']
 
+    # Build initial task index for supersteps before superstep_idx (built once, updated incrementally)
+    task_index = set()
+    for i in range(superstep_idx):
+        for proc, tasks in schedule.supersteps[i].tasks.items():
+            for task in tasks:
+                task_index.add(task.node)
+
     # Repair all subsequent supersteps (indices have shifted down after removal)
     for superstep in schedule.supersteps[superstep_idx:]:
-        _repair_superstep_dependencies(schedule, superstep)
+        _repair_superstep_dependencies(schedule, superstep, task_index)
+        # Add this superstep's tasks to the index for the next iteration
+        for proc, tasks in superstep.tasks.items():
+            for task in tasks:
+                task_index.add(task.node)
 
 
 def _build_task_location_index(schedule: BSPSchedule, up_to_superstep: Superstep) -> set:
@@ -207,15 +213,14 @@ def _build_task_location_index(schedule: BSPSchedule, up_to_superstep: Superstep
     return task_set
 
 
-def _repair_superstep_dependencies(schedule: BSPSchedule, superstep: Superstep):
+def _repair_superstep_dependencies(schedule: BSPSchedule, superstep: Superstep, task_index: set):
     """Repair dependencies in a superstep by duplicating missing predecessors.
 
     Args:
         schedule: BSP schedule being modified
         superstep: Superstep to repair
+        task_index: Set of task names available in earlier supersteps (passed for efficiency)
     """
-    # Build task location index for all earlier supersteps (O(n) pass instead of O(n³))
-    task_index = _build_task_location_index(schedule, superstep)
 
     # Repair each processor's tasks
     for processor in list(superstep.tasks.keys()):
