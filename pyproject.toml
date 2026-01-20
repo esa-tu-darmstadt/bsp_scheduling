@@ -16,7 +16,8 @@ classifiers = [
 dependencies = [
     "scipy<1.16",
     "wfcommons==1.2", # ==1.0
-    "anrg.saga>=0.0.11"
+    "anrg.saga==0.0.11",
+    "pycapnp==2.2.1",
 ]
 license = "MIT"
 
@@ -29,4 +30,5 @@ visualization = [
     "matplotlib",
     "pygraphviz",
     "tikzplotlib",
+    "rich",
 ]
