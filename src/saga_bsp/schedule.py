@@ -169,9 +169,6 @@ class Superstep:
     def invalidate_timings(self):
         """Invalidate all cached timings for this superstep"""
         self.compute_time.cache_clear()
-        self.exchange_time.cache_clear()
-        self.send_time.cache_clear()
-        self.receive_time.cache_clear()
         self.compute_phase_start.cache_clear()
         # Clear cached properties safely
         if 'max_compute_time' in self.__dict__:
@@ -180,6 +177,8 @@ class Superstep:
             del self.__dict__['max_exchange_time']
         if 'edges_to_communicate' in self.__dict__:
             del self.__dict__['edges_to_communicate']
+        if '_exchange_times_by_processor' in self.__dict__:
+            del self.__dict__['_exchange_times_by_processor']
         if 'sync_time' in self.__dict__:
             del self.__dict__['sync_time']
         # Strategy 1 & 2: Clear total_time and start_time caches
@@ -317,12 +316,27 @@ class Superstep:
         - The data hasn't been communicated in an earlier superstep
         """
         edges = []
+        my_index = self.index
+        task_graph = self.task_graph
+        schedule = self.schedule
+
+        # Pre-build set of (proc, pred_task) pairs already communicated in previous supersteps
+        # This changes O(supersteps * tasks) per-edge check to O(1) lookup
+        already_communicated = set()
+        for prev_idx in range(1, my_index):
+            prev_superstep = schedule.supersteps[prev_idx]
+            for proc, tasks in prev_superstep.tasks.items():
+                for task in tasks:
+                    for pred_name in task_graph.predecessors(task.node):
+                        already_communicated.add((proc, pred_name))
+
+        network = self.network
 
         # For each processor in this superstep
         for dest_proc, tasks in self.tasks.items():
             for task in tasks:
                 # Check each predecessor
-                for pred_task_name in self.task_graph.predecessors(task.node):
+                for pred_task_name in task_graph.predecessors(task.node):
                     pred_instances = self.schedule.task_mapping.get(pred_task_name, [])
 
                     # Check if predecessor is already on dest processor (no comm needed)
@@ -338,17 +352,17 @@ class Superstep:
                     # Find the instance to communicate from (fastest link among previous supersteps)
                     comm_instance = None
                     best_comm_time = float('inf')
-                    comm_weight = self.task_graph.edges[(pred_task_name, task.node)]['weight']
+                    comm_weight = task_graph.edges[(pred_task_name, task.node)]['weight']
 
                     for pred_instance in pred_instances:
                         if pred_instance.superstep.index < self.index:
                             source_proc = pred_instance.proc
 
                             # Calculate communication time for this instance
-                            if self.network.has_edge(source_proc, dest_proc):
-                                network_speed = self.network.edges[source_proc, dest_proc]['weight']
-                            elif self.network.has_edge(dest_proc, source_proc):
-                                network_speed = self.network.edges[dest_proc, source_proc]['weight']
+                            if network.has_edge(source_proc, dest_proc):
+                                network_speed = network.edges[source_proc, dest_proc]['weight']
+                            elif network.has_edge(dest_proc, source_proc):
+                                network_speed = network.edges[dest_proc, source_proc]['weight']
                             else:
                                 continue  # Skip if no connection exists
 
@@ -360,24 +374,46 @@ class Superstep:
                                 comm_instance = pred_instance
 
                     if comm_instance:
-                        # Check if data was already communicated in a previous superstep
-                        data_already_available = False
-                        for prev_idx in range(1, self.index):
-                            prev_superstep = self.schedule.supersteps[prev_idx]
-                            prev_tasks = prev_superstep.tasks.get(dest_proc, [])
-                            for prev_task in prev_tasks:
-                                if pred_task_name in self.task_graph.predecessors(prev_task.node):
-                                    data_already_available = True
-                                    break
-                            if data_already_available:
-                                break
-
-                        if not data_already_available:
-                            # Use the already calculated best communication time
+                        # Check if data was already communicated in a previous superstep (O(1) lookup)
+                        if (dest_proc, pred_task_name) not in already_communicated:
                             source_proc = comm_instance.proc
                             edges.append((source_proc, dest_proc, pred_task_name, task.node, best_comm_time))
 
         return edges
+
+    @cached_property
+    def _exchange_times_by_processor(self) -> dict:
+        """Precompute send, receive, and exchange times for all processors in one pass.
+
+        Returns dict with keys: 'send', 'receive', 'exchange' each mapping processor -> time
+        """
+        # Track send times by (source_proc, source_task) to handle broadcasting
+        send_by_task = {}  # (proc, task) -> max_comm_time
+        receive_times = {}  # proc -> total_receive_time
+
+        for source_proc, dest_proc, source_task, _, comm_time in self.edges_to_communicate:
+            # For sending, track max comm time per unique source task (broadcasting)
+            key = (source_proc, source_task)
+            if key not in send_by_task:
+                send_by_task[key] = comm_time
+            else:
+                send_by_task[key] = max(send_by_task[key], comm_time)
+
+            # For receiving, sum all incoming comm times
+            receive_times[dest_proc] = receive_times.get(dest_proc, 0.0) + comm_time
+
+        # Aggregate send times by processor
+        send_times = {}
+        for (proc, _), time in send_by_task.items():
+            send_times[proc] = send_times.get(proc, 0.0) + time
+
+        # Compute exchange times (max of send and receive)
+        all_procs = set(send_times.keys()) | set(receive_times.keys())
+        exchange_times = {}
+        for proc in all_procs:
+            exchange_times[proc] = max(send_times.get(proc, 0.0), receive_times.get(proc, 0.0))
+
+        return {'send': send_times, 'receive': receive_times, 'exchange': exchange_times}
 
     @cached_property
     def max_exchange_time(self) -> float:
@@ -403,7 +439,6 @@ class Superstep:
         return (self.tasks[processor][-1].rel_end
                 if self.tasks.get(processor) else 0.0)
 
-    @cache
     def send_time(self, processor: str) -> float:
         """Calculate the time needed for a processor to send data to other processors.
 
@@ -416,20 +451,8 @@ class Superstep:
         Returns:
             Total time needed to send all unique outgoing data from this processor
         """
-        # Group edges by source task to handle broadcasting
-        source_tasks_times = {}
-        for source_proc, _, source_task, _, comm_time in self.edges_to_communicate:
-            if source_proc == processor:
-                # For broadcasting, we take the max comm time for each unique source task
-                # (assuming the same data size is broadcast to all destinations)
-                if source_task not in source_tasks_times:
-                    source_tasks_times[source_task] = comm_time
-                else:
-                    source_tasks_times[source_task] = max(source_tasks_times[source_task], comm_time)
+        return self._exchange_times_by_processor['send'].get(processor, 0.0)
 
-        return sum(source_tasks_times.values())
-
-    @cache
     def receive_time(self, processor: str) -> float:
         """Calculate the time needed for a processor to receive data from other processors.
 
@@ -439,13 +462,8 @@ class Superstep:
         Returns:
             Total time needed to receive all incoming data for this processor
         """
-        return sum(
-            comm_time
-            for _, dest_proc, _, _, comm_time in self.edges_to_communicate
-            if dest_proc == processor
-        )
+        return self._exchange_times_by_processor['receive'].get(processor, 0.0)
 
-    @cache
     def exchange_time(self, processor: str) -> float:
         """Calculate exchange time for a processor in this superstep.
 
@@ -458,8 +476,7 @@ class Superstep:
         Returns:
             Maximum of send and receive times for this processor
         """
-        # Return the maximum as send and receive can overlap
-        return max(self.send_time(processor), self.receive_time(processor))
+        return self._exchange_times_by_processor['exchange'].get(processor, 0.0)
 
     @cache
     def compute_phase_start(self, processor: str) -> float:
@@ -801,49 +818,43 @@ class BSPSchedule:
 
         This method creates a structurally identical copy of the schedule while
         preserving expensive cached computations like rel_start, compute_time, etc.
-        This significantly improves performance when schedulers frequently copy schedules.
+        This is a fast O(n) implementation that directly builds data structures.
         """
         # Create new schedule instance
         new_schedule = BSPSchedule(self.hardware, self.task_graph)
+        new_schedule._batch_mode = True  # Prevent any timing propagation
 
-        # Use batch mode to avoid O(n²) start_time propagation during copying
-        new_schedule.begin_batch_update()
-
-        # Copy supersteps while preserving caches
+        # Copy supersteps directly without going through schedule_task()
         for superstep in self.supersteps:
-            new_superstep = new_schedule.add_superstep()
-            
-            # Copy tasks and build structure
+            new_superstep = Superstep(new_schedule)
+            new_schedule.supersteps.append(new_superstep)
+
+            # Copy tasks directly - no invalidation, no O(n) loops
             for processor, tasks in superstep.tasks.items():
+                new_task_list = []
                 for task in tasks:
-                    # Note: schedule() creates a new BSPTask, we'll copy cache after
-                    new_task = new_schedule.schedule(task.node, processor, new_superstep)
-                    
-                    # Preserve rel_start cache from original task if it exists
-                    if hasattr(task, '__dict__') and 'rel_start' in task.__dict__:
+                    # Create BSPTask directly
+                    new_task = BSPTask(task.node, processor, new_superstep)
+                    new_task_list.append(new_task)
+                    # Update task_mapping
+                    new_schedule.task_mapping[task.node].append(new_task)
+                    # Preserve rel_start cache
+                    if 'rel_start' in task.__dict__:
                         new_task.__dict__['rel_start'] = task.__dict__['rel_start']
-            
-            # Preserve superstep-level cached properties if they exist
-            if hasattr(superstep, '__dict__'):
-                # Preserve compute_time cache
-                if 'compute_time' in superstep.__dict__:
-                    new_superstep.__dict__['compute_time'] = superstep.__dict__['compute_time']
-                # Preserve exchange_time cache
-                if 'exchange_time' in superstep.__dict__:
-                    new_superstep.__dict__['exchange_time'] = superstep.__dict__['exchange_time']
-                # Preserve sync_time cache
-                if 'sync_time' in superstep.__dict__:
-                    new_superstep.__dict__['sync_time'] = superstep.__dict__['sync_time']
-                # Preserve total_time cache (Strategy 1)
-                if 'total_time' in superstep.__dict__:
-                    new_superstep.__dict__['total_time'] = superstep.__dict__['total_time']
-                # Preserve start_time cache (Strategy 2)
-                if 'start_time' in superstep.__dict__:
-                    new_superstep.__dict__['start_time'] = superstep.__dict__['start_time']
+                new_superstep.tasks[processor] = new_task_list
 
-        # End batch mode without invalidating (caches were preserved above)
+            # Preserve superstep-level cached properties
+            superstep_dict = superstep.__dict__
+            new_superstep_dict = new_superstep.__dict__
+            for key in ('sync_time', 'total_time', 'start_time', 'index',
+                        'max_compute_time', 'max_exchange_time',
+                        'edges_to_communicate', '_exchange_times_by_processor'):
+                if key in superstep_dict:
+                    new_superstep_dict[key] = superstep_dict[key]
+
+        # Don't copy _communicated_up_to - copies will rebuild as needed
+        # Copying large sets is expensive and they get invalidated during modification anyway
         new_schedule._batch_mode = False
-
         return new_schedule
     
     def is_valid(self) -> Tuple[bool, List[str]]:
