@@ -137,6 +137,8 @@ class Superstep:
         self.tasks: Dict[str, List[BSPTask]] = defaultdict(
             list
         )  # Tasks scheduled on each processor
+        # Cache hardware sync_time to avoid property chain lookups (Strategy 3)
+        self._hardware_sync_time = schedule.hardware.sync_time
 
     def schedule_task(self, task: str, processor: str, position: Optional[int] = None) -> BSPTask:
         """Schedule a task at a specific position on a processor in this superstep.
@@ -174,12 +176,25 @@ class Superstep:
         # Clear cached properties safely
         if 'max_compute_time' in self.__dict__:
             del self.__dict__['max_compute_time']
-        if 'sync_time' in self.__dict__:
-            del self.__dict__['sync_time']
         if 'max_exchange_time' in self.__dict__:
             del self.__dict__['max_exchange_time']
         if 'edges_to_communicate' in self.__dict__:
             del self.__dict__['edges_to_communicate']
+        if 'sync_time' in self.__dict__:
+            del self.__dict__['sync_time']
+        # Strategy 1 & 2: Clear total_time and start_time caches
+        if 'total_time' in self.__dict__:
+            del self.__dict__['total_time']
+        if 'start_time' in self.__dict__:
+            del self.__dict__['start_time']
+        # Propagate start_time invalidation to subsequent supersteps (unless in batch mode)
+        if not self.schedule._batch_mode:
+            my_index = self.__dict__.get('index')
+            if my_index is not None:
+                for i in range(my_index + 1, len(self.schedule.supersteps)):
+                    later_ss = self.schedule.supersteps[i]
+                    if 'start_time' in later_ss.__dict__:
+                        del later_ss.__dict__['start_time']
 
     @cached_property
     def index(self) -> int:
@@ -201,7 +216,7 @@ class Superstep:
         """Task graph for this superstep"""
         return self.schedule.task_graph
 
-    @property
+    @cached_property
     def total_time(self) -> float:
         """Total time of this superstep.
 
@@ -209,33 +224,56 @@ class Superstep:
         - Synchronization time (same for all processors)
         - Processor-specific exchange time
         - Processor-specific computation time
+
+        Note: This is cached for performance. Call invalidate_timings() when tasks change.
         """
+        sync = self.sync_time  # Cache locally to avoid repeated property access
         if not self.tasks:
-            return self.sync_time
+            return sync
 
         # Find the maximum end time across all processors
         max_end_time = 0.0
         for proc in self.tasks:
-            proc_end_time = (self.sync_time +
+            proc_end_time = (sync +
                            self.exchange_time(proc) +
                            self.compute_time(proc))
-            max_end_time = max(max_end_time, proc_end_time)
+            if proc_end_time > max_end_time:
+                max_end_time = proc_end_time
 
         return max_end_time
 
-    @property
+    @cached_property
     def start_time(self) -> float:
-        """Start time of this superstep, which is the end time of the previous superstep or 0 for the first one."""
+        """Start time of this superstep, which is the end time of the previous superstep or 0 for the first one.
+
+        Note: This is cached for performance. Call invalidate_timings() when tasks change.
+        Uses iterative calculation to avoid recursion issues with deep superstep chains.
+        """
         index_ = self.index
         if index_ == 0:
             return 0.0
-        # We could simply do the following, but recursion in python is very slow
-        # return self.schedule.supersteps[index_ - 1].end_time
-        
-        # Instead, lets calculate it iteratively
-        return sum(
-            superstep.total_time for superstep in self.schedule.supersteps[:index_]
-        )
+        # Iterative calculation to avoid recursion limit issues
+        # Walk backwards to find first superstep with cached start_time, then compute forward
+        supersteps = self.schedule.supersteps
+
+        # Find the earliest superstep that needs computation
+        first_uncached = 0
+        for i in range(index_ - 1, -1, -1):
+            if 'start_time' in supersteps[i].__dict__:
+                first_uncached = i + 1
+                break
+
+        # Compute start_times iteratively from first_uncached to index_
+        if first_uncached == 0:
+            current_time = 0.0
+        else:
+            current_time = supersteps[first_uncached - 1].start_time + supersteps[first_uncached - 1].total_time
+
+        for i in range(first_uncached, index_):
+            supersteps[i].__dict__['start_time'] = current_time
+            current_time += supersteps[i].total_time
+
+        return current_time
 
     @property
     def end_time(self) -> float:
@@ -253,19 +291,17 @@ class Superstep:
             return 0.0
         return max(self.compute_time(proc) for proc in self.tasks)
 
-    @property
+    @cached_property
     def sync_time(self) -> float:
-        """Total synchronization time."""
+        """Total synchronization time.
+
+        Note: Uses cached _hardware_sync_time to avoid property chain overhead.
+        """
         # No sync time for the first superstep
         if self.index == 0:
             return 0.0
-        # # If no tasks are scheduled, no sync time is needed (empty superstep)
-        # if not self.tasks:
-        #     return 0.0
-        # # No sync is required if nothing to communicate
-        # if self.exchange_time == 0.0:
-        #     return 0.0
-        return self.hardware.sync_time
+        # Use cached value instead of self.hardware.sync_time (Strategy 3)
+        return self._hardware_sync_time
 
     @cached_property
     def edges_to_communicate(self) -> List[Tuple[str, str, str, str, float]]:
@@ -492,6 +528,23 @@ class BSPSchedule:
         self.task_mapping: defaultdict[str, List[BSPTask]] = defaultdict(
             list
         )  # Mapping of task names to lists of BSPTask objects (supports duplication)
+        self._batch_mode = False  # When True, skip start_time propagation in invalidate_timings
+
+    def begin_batch_update(self):
+        """Begin batch update mode - defers start_time propagation for performance.
+
+        Use this when making many modifications (e.g., during optimization).
+        Call end_batch_update() when done to invalidate all start_times.
+        """
+        self._batch_mode = True
+
+    def end_batch_update(self):
+        """End batch update mode and invalidate all start_time caches."""
+        self._batch_mode = False
+        # Invalidate all start_time caches
+        for superstep in self.supersteps:
+            if 'start_time' in superstep.__dict__:
+                del superstep.__dict__['start_time']
 
     def add_superstep(self) -> Superstep:
         """Add a new superstep to the schedule and return it."""
@@ -682,11 +735,13 @@ class BSPSchedule:
             # Schedule a new instance in the new superstep
             self.schedule(task_name, processor, new_superstep)
         
-        # Invalidate cached indices for all following supersteps
+        # Invalidate cached indices and start_times for all following supersteps
         for i in range(current_index + 1, len(self.supersteps)):
             if 'index' in self.supersteps[i].__dict__:
                 del self.supersteps[i].__dict__['index']
-        
+            if 'start_time' in self.supersteps[i].__dict__:
+                del self.supersteps[i].__dict__['start_time']
+
         return new_superstep
     
     def can_be_scheduled_in(self, task_name: str, superstep: Superstep, processor: int) -> bool:
@@ -743,14 +798,17 @@ class BSPSchedule:
     
     def copy(self) -> "BSPSchedule":
         """Create a deep copy of the schedule while preserving cached timing values.
-        
+
         This method creates a structurally identical copy of the schedule while
         preserving expensive cached computations like rel_start, compute_time, etc.
         This significantly improves performance when schedulers frequently copy schedules.
         """
         # Create new schedule instance
         new_schedule = BSPSchedule(self.hardware, self.task_graph)
-        
+
+        # Use batch mode to avoid O(n²) start_time propagation during copying
+        new_schedule.begin_batch_update()
+
         # Copy supersteps while preserving caches
         for superstep in self.supersteps:
             new_superstep = new_schedule.add_superstep()
@@ -770,14 +828,22 @@ class BSPSchedule:
                 # Preserve compute_time cache
                 if 'compute_time' in superstep.__dict__:
                     new_superstep.__dict__['compute_time'] = superstep.__dict__['compute_time']
-                # Preserve exchange_time cache  
+                # Preserve exchange_time cache
                 if 'exchange_time' in superstep.__dict__:
                     new_superstep.__dict__['exchange_time'] = superstep.__dict__['exchange_time']
-                # Preserve sync_time cache (though it's a property, it might be cached in __dict__)
+                # Preserve sync_time cache
                 if 'sync_time' in superstep.__dict__:
                     new_superstep.__dict__['sync_time'] = superstep.__dict__['sync_time']
-        
-        
+                # Preserve total_time cache (Strategy 1)
+                if 'total_time' in superstep.__dict__:
+                    new_superstep.__dict__['total_time'] = superstep.__dict__['total_time']
+                # Preserve start_time cache (Strategy 2)
+                if 'start_time' in superstep.__dict__:
+                    new_superstep.__dict__['start_time'] = superstep.__dict__['start_time']
+
+        # End batch mode without invalidating (caches were preserved above)
+        new_schedule._batch_mode = False
+
         return new_schedule
     
     def is_valid(self) -> Tuple[bool, List[str]]:
@@ -959,11 +1025,13 @@ class BSPSchedule:
         
         # Invalidate timings for the merged superstep
         first_superstep.invalidate_timings()
-        
-        # Invalidate cached indices for all supersteps after the merge
+
+        # Invalidate cached indices and start_times for all supersteps after the merge
         for superstep in self.supersteps[first_idx:]:
             if 'index' in superstep.__dict__:
                 del superstep.__dict__['index']
+            if 'start_time' in superstep.__dict__:
+                del superstep.__dict__['start_time']
 class AsyncSchedule(MutableMapping[Hashable, List[Task]]):
     """Encapsulates an asynchronous schedule as a mapping of processors to task lists.
     In SAGA, `Dict[Hashable, List[Task]]` is used to represent a (asynchronous) schedule.

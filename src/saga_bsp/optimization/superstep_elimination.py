@@ -100,8 +100,13 @@ def optimize_superstep_elimination(schedule: BSPSchedule, verbose: bool = False)
             trial_schedule = current_schedule.copy()
 
             try:
-                # Perform elimination and repair on trial schedule
-                _eliminate_and_repair_superstep(trial_schedule, superstep_idx)
+                # Use batch mode to defer start_time propagation during repairs
+                trial_schedule.begin_batch_update()
+                try:
+                    # Perform elimination and repair on trial schedule
+                    _eliminate_and_repair_superstep(trial_schedule, superstep_idx)
+                finally:
+                    trial_schedule.end_batch_update()
 
                 # Calculate new makespan
                 new_makespan = trial_schedule.makespan
