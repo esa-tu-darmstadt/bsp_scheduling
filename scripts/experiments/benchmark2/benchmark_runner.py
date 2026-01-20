@@ -217,16 +217,20 @@ class BenchmarkRunner:
         # Filter out None results (failed executions)
         valid_results = [r for r in parallel_results if r is not None]
 
-        # Group results by task graph and calculate ratios
+        # Group results by (task_graph_idx, num_tiles) and calculate ratios
+        # Each unique (graph, hardware) pair should be normalized independently
         results = []
-        for task_graph_idx in range(len(dataset_items)):
-            # Get results for this task graph
-            task_results = [r for r in valid_results if r['task_graph_idx'] == task_graph_idx]
+        instance_keys = set((r['task_graph_idx'], r.get('num_tiles')) for r in valid_results)
+
+        for task_graph_idx, num_tiles in instance_keys:
+            # Get results for this specific (graph, hardware) instance
+            task_results = [r for r in valid_results
+                          if r['task_graph_idx'] == task_graph_idx and r.get('num_tiles') == num_tiles]
 
             if not task_results:
                 continue
 
-            # Calculate ratios relative to best scheduler for this task graph
+            # Calculate ratios relative to best scheduler for this instance
             makespans = {r['scheduler_name']: r['makespan'] for r in task_results}
             best_makespan = min(makespans.values())
 
@@ -315,11 +319,6 @@ class BenchmarkRunner:
         dataset_info = {}  # dataset_name -> (savepath, num_items) for result saving
 
         for dataset_key, dataset_file in available_datasets:
-            savepath = resultsdir / f"{dataset_key}.csv"
-            if savepath.exists() and not overwrite:
-                logger.debug(f"Results for {dataset_key} already exist. Skipping.")
-                continue
-
             try:
                 dataset_items, dataset_metadata = load_dataset(dataset_file)
 
@@ -327,13 +326,19 @@ class BenchmarkRunner:
                     logger.warning(f"No items in dataset {dataset_key}, skipping")
                     continue
 
+                # Use display name from metadata if available, fallback to dataset_key
+                display_name = getattr(dataset_metadata, 'dataset_name', dataset_key)
+
+                # Use display_name for CSV filename to get clean names like "in_tree" instead of "primitives_in_tree"
+                savepath = resultsdir / f"{display_name}.csv"
+                if savepath.exists() and not overwrite:
+                    logger.debug(f"Results for {display_name} already exist. Skipping.")
+                    continue
+
                 # Limit number of dataset items for benchmarking
                 if max_instances > 0 and len(dataset_items) > max_instances:
                     dataset_items = dataset_items[:max_instances]
-                    logger.debug(f"Limited to {max_instances} instances for {dataset_key}")
-
-                # Use display name from metadata if available, fallback to dataset_key
-                display_name = getattr(dataset_metadata, 'dataset_name', dataset_key)
+                    logger.debug(f"Limited to {max_instances} instances for {display_name}")
 
                 # Store dataset info for later result saving
                 dataset_info[display_name] = {
@@ -456,12 +461,14 @@ class BenchmarkRunner:
                 logger.warning(f"No results for dataset {dataset_name}")
                 continue
 
-            # Calculate ratios relative to best scheduler for each task graph
+            # Calculate ratios relative to best scheduler for each (task_graph, hardware) instance
+            # Each unique (graph, hardware) pair should be normalized independently
             final_results = []
-            task_graph_indices = set(r['task_graph_idx'] for r in dataset_results)
+            instance_keys = set((r['task_graph_idx'], r.get('num_tiles')) for r in dataset_results)
 
-            for task_graph_idx in task_graph_indices:
-                task_results = [r for r in dataset_results if r['task_graph_idx'] == task_graph_idx]
+            for task_graph_idx, num_tiles in instance_keys:
+                task_results = [r for r in dataset_results
+                              if r['task_graph_idx'] == task_graph_idx and r.get('num_tiles') == num_tiles]
 
                 if not task_results:
                     continue
