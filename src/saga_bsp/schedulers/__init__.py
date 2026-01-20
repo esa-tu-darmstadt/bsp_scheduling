@@ -7,4 +7,12 @@ from .fillin_append_bsp import FillInAppendBSPScheduler
 from .bcsh import BCSHScheduler
 from .hdagg import HDaggScheduler
 
-__all__ = ['BSPScheduler', 'AsyncToBSPScheduler', 'ListBSPScheduler', 'MSAScheduler', 'FillInSplitBSPScheduler', 'FillInAppendBSPScheduler', 'BCSHScheduler', 'HDaggScheduler']
+# Papp et al. 2024 schedulers
+from .papp import BSPgScheduler, SourceScheduler, MultilevelScheduler, DAGCoarsener, ContractionRecord
+
+__all__ = [
+    'BSPScheduler', 'AsyncToBSPScheduler', 'ListBSPScheduler', 'MSAScheduler',
+    'FillInSplitBSPScheduler', 'FillInAppendBSPScheduler', 'BCSHScheduler', 'HDaggScheduler',
+    # Papp et al. 2024
+    'BSPgScheduler', 'SourceScheduler', 'MultilevelScheduler', 'DAGCoarsener', 'ContractionRecord',
+]
