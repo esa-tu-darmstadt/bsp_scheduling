@@ -13,7 +13,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 
-from schedulers import get_scheduler_display_name, get_ordered_scheduler_names, is_delay_model_scheduler
+from schedulers import (
+    get_scheduler_display_name, get_ordered_scheduler_names, is_delay_model_scheduler,
+    organize_schedulers_by_group, SCHEDULER_GROUP_LABELS
+)
 
 
 def propagate_timeouts_per_dataset(data: pd.DataFrame) -> pd.DataFrame:
@@ -308,7 +311,7 @@ class BoxPlotVisualizer:
         Timed-out results are excluded from box plots, with timeout counts shown as
         red triangle markers at the top of the plot.
         """
-        plt.figure(figsize=(7.16/2, 4.5))
+        plt.figure(figsize=(7.16/2*2, 4.5))
 
         # Sort by scheduler order
         data = data.sort_values('scheduler_order')
@@ -338,11 +341,40 @@ class BoxPlotVisualizer:
         plt.ylim(1, 5)  # Fixed scale from 1 to 5
         plt.grid(visible=True, axis='y', linestyle='--', alpha=0.7)
 
-        # Add delay model separator if applicable
+        # Add scheduler group separators and labels
         scheduler_names = data['scheduler'].unique()
-        delay_scheduler_count = sum(1 for name in scheduler_names if is_delay_model_scheduler(name))
-        if delay_scheduler_count > 0:
-            plt.axvline(x=delay_scheduler_count - 0.5, color='black', linewidth=2, alpha=0.8)
+        _, scheduler_group_boundaries = organize_schedulers_by_group(scheduler_names)
+        if scheduler_group_boundaries:
+            y_min, y_max = plt.ylim()
+            # Position for bracket and labels at top
+            bracket_y = y_max + (y_max - y_min) * 0.05
+            label_y = y_max + (y_max - y_min) * 0.12
+            tick_height = (y_max - y_min) * 0.03
+
+            for group_label, (start_idx, end_idx) in scheduler_group_boundaries.items():
+                # Add vertical line between groups (except before first group)
+                if start_idx > 0:
+                    plt.axvline(x=start_idx - 0.5, color='black', linewidth=3)
+
+                # Draw bracket: horizontal line with end ticks
+                bracket_left = start_idx - 0.4
+                bracket_right = end_idx - 0.6
+                group_center_x = (start_idx + end_idx) / 2 - 0.5
+
+                # Horizontal line
+                ax.plot([bracket_left, bracket_right], [bracket_y, bracket_y],
+                       color='black', linewidth=1.5, clip_on=False)
+                # Left tick
+                ax.plot([bracket_left, bracket_left], [bracket_y - tick_height, bracket_y],
+                       color='black', linewidth=1.5, clip_on=False)
+                # Right tick
+                ax.plot([bracket_right, bracket_right], [bracket_y - tick_height, bracket_y],
+                       color='black', linewidth=1.5, clip_on=False)
+
+                # Add group label above bracket
+                ax.text(group_center_x, label_y, group_label,
+                       ha='center', va='bottom', fontsize=7, fontweight='bold',
+                       color='black', clip_on=False)
 
         # Add timeout markers at the top of the plot
         if has_timeout_col and any(timeout_counts.values()):
@@ -569,16 +601,38 @@ class HeatmapVisualizer:
         for i in range(len(datasets) + 1):
             ax.axhline(i, color='black', linewidth=1)
 
-        # Add visual separator for delay model scheduler
-        delay_scheduler_count = sum(1 for name in ordered_names if is_delay_model_scheduler(name))
-        if delay_scheduler_count > 0:
-            # Add vertical line after delay model schedulers
-            ax.axvline(x=delay_scheduler_count, color='black', linewidth=4, alpha=1)
-            # Add text annotation
-            # ax.text(delay_scheduler_count/2, -0.3, 'Delay Model',
-            #        ha='center', va='top', color='black', fontweight='bold', fontsize=10)
-            # ax.text(delay_scheduler_count + (len(ordered_display_names) - delay_scheduler_count)/2, -0.3, 'BSP Models',
-            #        ha='center', va='top', color='black', fontweight='bold', fontsize=10)
+        # Get scheduler group boundaries and add separators with labels
+        _, scheduler_group_boundaries = organize_schedulers_by_group(scheduler_names)
+        if scheduler_group_boundaries:
+            # Position for bracket and labels at top
+            bracket_y = len(datasets) + 0.3
+            label_y = len(datasets) + 0.7
+            tick_height = 0.15
+
+            for group_label, (start_idx, end_idx) in scheduler_group_boundaries.items():
+                # Add vertical line between groups (except before first group)
+                if start_idx > 0:
+                    ax.axvline(x=start_idx, color='black', linewidth=4)
+
+                # Draw bracket: horizontal line with end ticks
+                bracket_left = start_idx + 0.1
+                bracket_right = end_idx - 0.1
+                group_center_x = (start_idx + end_idx) / 2
+
+                # Horizontal line
+                ax.plot([bracket_left, bracket_right], [bracket_y, bracket_y],
+                       color='black', linewidth=1.5, clip_on=False)
+                # Left tick
+                ax.plot([bracket_left, bracket_left], [bracket_y - tick_height, bracket_y],
+                       color='black', linewidth=1.5, clip_on=False)
+                # Right tick
+                ax.plot([bracket_right, bracket_right], [bracket_y - tick_height, bracket_y],
+                       color='black', linewidth=1.5, clip_on=False)
+
+                # Add group label above bracket
+                ax.text(group_center_x, label_y, group_label,
+                       ha='center', va='bottom', fontsize=label_textsize, fontweight='bold',
+                       color='black', clip_on=False)
 
         # Add horizontal colorbar at bottom to save horizontal space
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=global_min, vmax=global_max))

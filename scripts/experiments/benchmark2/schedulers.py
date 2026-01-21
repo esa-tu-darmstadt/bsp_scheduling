@@ -16,6 +16,7 @@ from saga_bsp.schedulers.delaymodel import HeftScheduler
 # Import BSP schedulers and utilities
 from saga_bsp.misc.heft_busy_communication import HeftBusyCommScheduler
 from saga_bsp.schedulers import FillInSplitBSPScheduler, BCSHScheduler, HDaggScheduler
+from saga_bsp.schedulers import BSPgScheduler, SourceScheduler, MultilevelScheduler
 from saga_bsp import AsyncToBSPScheduler
 
 logger = logging.getLogger(__name__)
@@ -121,8 +122,47 @@ SCHEDULER_ORDER = [
     "HDaggScheduler-0.1",
     "HDaggScheduler-0.5",
     "BCSHScheduler-NoEFT",
-    "BCSHScheduler-EFT"
+    "BCSHScheduler-EFT",
+    # Papp et al. 2024 schedulers
+    "BSPgScheduler",
+    "SourceScheduler",
+    "MultilevelScheduler-15",
+    "MultilevelScheduler-30",
 ]
+
+# Scheduler groups for visualization labels and separators
+# Groups are ordered: baseline -> proposed (ours) -> existing (comparison)
+SCHEDULER_GROUPS = {
+    "baseline": [
+        "HeftBusyCommScheduler",
+    ],
+    "proposed": [
+        "HEFT-BSP-EarliestNext",
+        "HEFT-BSP-Eager",
+        "FillInSplitBSPScheduler-HEFT",
+        "FillInSplitBSPScheduler-HEFT-Merge",
+        "FillInSplitBSPScheduler-CPoP",
+        "FillInSplitBSPScheduler-CPoP-Merge",
+    ],
+    "existing": [
+        "HDaggScheduler-0.01",
+        "HDaggScheduler-0.1",
+        "HDaggScheduler-0.5",
+        "BCSHScheduler-NoEFT",
+        "BCSHScheduler-EFT",
+        "BSPgScheduler",
+        "SourceScheduler",
+        "MultilevelScheduler-15",
+        "MultilevelScheduler-30",
+    ],
+}
+
+# Display labels for scheduler groups
+SCHEDULER_GROUP_LABELS = {
+    "baseline": "Async Baseline",
+    "proposed": "Our Work",
+    "existing": "Existing BSP Schedulers",
+}
 
 # Scheduler renames for display
 SCHEDULER_RENAMES = {
@@ -133,11 +173,17 @@ SCHEDULER_RENAMES = {
     "FillInSplitBSPScheduler-CPoP": "BALS Combined",
     "FillInSplitBSPScheduler-HEFT-Merge": "BALS Upw. + Elim.",
     "FillInSplitBSPScheduler-CPoP-Merge": "BALS Comb. + Elim.",
+    # HDagg schedulers
     "HDaggScheduler-0.01": "HDagg (ε=0.01)",
     "HDaggScheduler-0.1": "HDagg (ε=0.1)",
     "HDaggScheduler-0.5": "HDagg (ε=0.5)",
     "BCSHScheduler-NoEFT": "BCSH (LDSH)",
-    "BCSHScheduler-EFT": "BCSH (EFT)"
+    "BCSHScheduler-EFT": "BCSH (EFT)",
+    # Papp et al. 2024 schedulers
+    "BSPgScheduler": "BSPg",
+    "SourceScheduler": "Source",
+    "MultilevelScheduler-15": "Multilevel (15%)",
+    "MultilevelScheduler-30": "Multilevel (30%)",
 }
 
 def create_bsp_schedulers() -> Dict[str, object]:
@@ -195,7 +241,7 @@ def create_bsp_schedulers() -> Dict[str, object]:
     schedulers["FillInSplitBSPScheduler-CPoP-Merge"] = UnifiedSchedulerWrapper(
         FillInSplitBSPScheduler(priority_mode='cpop', optimize_merging=True)
     )
-    
+
     schedulers["HDaggScheduler-0.01"] = UnifiedSchedulerWrapper(
         HDaggScheduler(epsilon=0.01)
     )
@@ -214,6 +260,23 @@ def create_bsp_schedulers() -> Dict[str, object]:
 
     schedulers["BCSHScheduler-EFT"] = UnifiedSchedulerWrapper(
         BCSHScheduler(use_eft=True)
+    )
+
+    # 4. Papp et al. 2024 schedulers
+    schedulers["BSPgScheduler"] = UnifiedSchedulerWrapper(
+        BSPgScheduler()
+    )
+
+    schedulers["SourceScheduler"] = UnifiedSchedulerWrapper(
+        SourceScheduler()
+    )
+
+    schedulers["MultilevelScheduler-15"] = UnifiedSchedulerWrapper(
+        MultilevelScheduler(coarsening_ratios=[0.15], hc_interval=100, hc_max_steps=20)
+    )
+
+    schedulers["MultilevelScheduler-30"] = UnifiedSchedulerWrapper(
+        MultilevelScheduler(coarsening_ratios=[0.30], hc_interval=100, hc_max_steps=20)
     )
 
     return schedulers
@@ -276,3 +339,60 @@ def is_delay_model_scheduler(scheduler_name: str) -> bool:
         True if scheduler uses delay/async model
     """
     return scheduler_name in ["HeftBusyCommScheduler"]
+
+
+def get_scheduler_group(scheduler_name: str) -> str:
+    """Get the group that a scheduler belongs to.
+
+    Args:
+        scheduler_name: Name of the scheduler
+
+    Returns:
+        Group name ('baseline', 'proposed', or 'existing')
+    """
+    for group_name, schedulers in SCHEDULER_GROUPS.items():
+        if scheduler_name in schedulers:
+            return group_name
+    return "existing"  # Default to existing for unknown schedulers
+
+
+def organize_schedulers_by_group(scheduler_names: List[str]) -> tuple:
+    """Organize schedulers by their group for visualization.
+
+    Args:
+        scheduler_names: List of scheduler names to organize
+
+    Returns:
+        Tuple of (ordered_schedulers, group_boundaries)
+        where group_boundaries maps group_label to (start_idx, end_idx)
+    """
+    # First, order the schedulers
+    ordered_schedulers = get_ordered_scheduler_names(scheduler_names)
+
+    # Group order for visualization
+    group_order = ["baseline", "proposed", "existing"]
+
+    # Calculate boundaries based on actual scheduler positions
+    group_boundaries = {}
+    current_group = None
+    group_start = 0
+
+    for idx, scheduler in enumerate(ordered_schedulers):
+        scheduler_group = get_scheduler_group(scheduler)
+
+        if scheduler_group != current_group:
+            # Close previous group if exists
+            if current_group is not None and current_group in group_order:
+                label = SCHEDULER_GROUP_LABELS.get(current_group, current_group)
+                group_boundaries[label] = (group_start, idx)
+
+            # Start new group
+            current_group = scheduler_group
+            group_start = idx
+
+    # Close the last group
+    if current_group is not None and current_group in group_order:
+        label = SCHEDULER_GROUP_LABELS.get(current_group, current_group)
+        group_boundaries[label] = (group_start, len(ordered_schedulers))
+
+    return ordered_schedulers, group_boundaries
