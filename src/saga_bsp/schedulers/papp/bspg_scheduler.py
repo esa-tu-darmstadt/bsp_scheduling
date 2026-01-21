@@ -29,12 +29,29 @@ class BSPgScheduler(BSPScheduler):
     5. Close superstep when ≥P/2 processors are idle without assignable nodes
     """
 
-    def __init__(self, verbose: bool = False):
+    def __init__(self, verbose: bool = False, optimized: bool = True):
+        """Initialize the BSPg scheduler.
+
+        Args:
+            verbose: Print progress information
+            optimized: Use optimized implementation with min-heap for finish_times
+                       and incremental idle count tracking. This is our optimization
+                       (not from the paper) that provides better performance on large
+                       graphs. Results should be identical to the standard implementation.
+        """
         super().__init__()
         self.name = "BSPg"
         self.verbose = verbose
+        self.optimized = optimized
 
     def schedule(self, hardware: BSPHardware, task_graph: nx.DiGraph) -> BSPSchedule:
+        """Schedule tasks using BSPg algorithm."""
+        if self.optimized:
+            return self._schedule_optimized(hardware, task_graph)
+        else:
+            return self._schedule_standard(hardware, task_graph)
+
+    def _schedule_standard(self, hardware: BSPHardware, task_graph: nx.DiGraph) -> BSPSchedule:
         """Schedule tasks using BSPg algorithm."""
         schedule = BSPSchedule(hardware, task_graph)
 
@@ -155,6 +172,162 @@ class BSPgScheduler(BSPScheduler):
             # Check if we should close the superstep
             idle_count = sum(1 for p in processors if finish_times[p] == float('inf'))
             if not end_step and ready_all == set() and idle_count >= num_processors // 2:
+                end_step = True
+
+        # Merge supersteps where possible
+        schedule.merge_supersteps()
+
+        schedule.assert_valid()
+        return schedule
+
+    def _schedule_optimized(self, hardware: BSPHardware, task_graph: nx.DiGraph) -> BSPSchedule:
+        """Optimized BSPg scheduling with heap-based processor management.
+
+        Optimizations over standard implementation (not from the paper):
+        - Uses min-heap for finish_times: O(log P) updates instead of O(P) min search
+        - Tracks idle count incrementally instead of O(P) count each iteration
+        - Caches processor speeds to avoid repeated dict lookups
+        """
+        schedule = BSPSchedule(hardware, task_graph)
+
+        num_processors = len(hardware.network.nodes())
+        processors = list(hardware.network.nodes())
+
+        # Cache processor speeds for faster lookup
+        proc_speeds = {p: hardware.network.nodes[p]['weight'] for p in processors}
+
+        # Track processor states using a min-heap for efficient min-time lookup
+        # Heap entries: (finish_time, processor_id)
+        # Also maintain a dict for O(1) lookup of current finish time per processor
+        finish_times: Dict[str, float] = {p: 0.0 for p in processors}
+        # Initial heap: all processors available at time 0
+        finish_heap: List[Tuple[float, str]] = [(0.0, p) for p in processors]
+        heapq.heapify(finish_heap)
+
+        # Track idle processors incrementally
+        idle_count = 0
+
+        # Track which nodes are assigned
+        assigned: Set[str] = set()
+
+        # Ready sets
+        ready_p: Dict[str, Set[str]] = {p: set() for p in processors}
+        ready_all: Set[str] = set()
+
+        # Track processor assignments
+        proc_assignments: Dict[str, str] = {}  # node -> processor
+        superstep_assignments: Dict[str, int] = {}  # node -> superstep index
+
+        # Initialize: find source nodes (no predecessors)
+        ready = set()
+        for node in task_graph.nodes():
+            if task_graph.in_degree(node) == 0:
+                ready.add(node)
+        ready_all = ready.copy()
+
+        current_superstep_idx = 0
+        current_superstep = schedule.add_superstep()
+        end_step = False
+
+        total_nodes = len(task_graph.nodes())
+
+        while len(assigned) < total_nodes:
+            if end_step and idle_count == num_processors:
+                # Start new superstep - all processors are idle
+                ready_p = {p: set() for p in processors}
+                ready_all = ready.copy()
+                current_superstep_idx += 1
+                current_superstep = schedule.add_superstep()
+                end_step = False
+                # Reset finish times and heap
+                finish_times = {p: 0.0 for p in processors}
+                finish_heap = [(0.0, p) for p in processors]
+                heapq.heapify(finish_heap)
+                idle_count = 0
+
+            # Find the earliest time when a processor becomes free
+            # Pop stale entries from heap (where heap time doesn't match current finish_times)
+            while finish_heap:
+                min_time, min_proc = finish_heap[0]
+                if finish_times[min_proc] == min_time:
+                    break
+                heapq.heappop(finish_heap)  # Stale entry, remove it
+
+            if not finish_heap:
+                # All processors are idle (shouldn't happen if idle_count is correct)
+                break
+
+            min_finish_time = finish_heap[0][0]
+
+            # Find all processors that finish at this time
+            # Pop all entries with min_finish_time
+            free_processors = []
+            while finish_heap and finish_heap[0][0] == min_finish_time:
+                t, proc = heapq.heappop(finish_heap)
+                if finish_times[proc] == t:  # Not stale
+                    free_processors.append(proc)
+
+            # Try to assign nodes to free processors
+            for proc in free_processors:
+                if end_step:
+                    node = self._choose_node(proc, ready_p[proc], set(), task_graph, proc_assignments)
+                else:
+                    node = self._choose_node(proc, ready_p[proc], ready_all, task_graph, proc_assignments)
+
+                if node is not None:
+                    # Assign node to processor in current superstep
+                    schedule.schedule(node, proc, current_superstep)
+                    assigned.add(node)
+                    proc_assignments[node] = proc
+                    superstep_assignments[node] = current_superstep_idx
+
+                    # Remove from ready sets
+                    ready_p[proc].discard(node)
+                    ready_all.discard(node)
+                    ready.discard(node)
+
+                    # Update finish time using cached proc speed
+                    work_weight = task_graph.nodes[node]['weight']
+                    duration = work_weight / proc_speeds[proc]
+                    new_finish_time = min_finish_time + duration
+                    finish_times[proc] = new_finish_time
+                    heapq.heappush(finish_heap, (new_finish_time, proc))
+
+                    # Update ready sets for successors
+                    for succ in task_graph.successors(node):
+                        if succ in assigned:
+                            continue
+
+                        # Check if all predecessors are assigned
+                        all_preds_assigned = all(
+                            pred in assigned for pred in task_graph.predecessors(succ)
+                        )
+
+                        if all_preds_assigned:
+                            ready.add(succ)
+
+                            # Check if succ can be scheduled in current superstep on proc
+                            all_preds_on_proc_or_earlier = True
+
+                            for pred in task_graph.predecessors(succ):
+                                pred_ss = superstep_assignments[pred]
+                                pred_proc = proc_assignments[pred]
+
+                                if pred_ss == current_superstep_idx:
+                                    if pred_proc != proc:
+                                        all_preds_on_proc_or_earlier = False
+                                        break
+
+                            if all_preds_on_proc_or_earlier:
+                                ready_p[proc].add(succ)
+                else:
+                    # Processor cannot be assigned a node - mark as idle
+                    finish_times[proc] = float('inf')
+                    idle_count += 1
+                    # Don't push inf to heap - we track idle count separately
+
+            # Check if we should close the superstep
+            if not end_step and not ready_all and idle_count >= num_processors // 2:
                 end_step = True
 
         # Merge supersteps where possible
