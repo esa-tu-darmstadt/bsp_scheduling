@@ -50,7 +50,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
 
     def __init__(self, verbose: bool = False, draw_after_each_step: bool = False,
                  priority_mode: str = "heft", optimize_merging: bool = False,
-                 superstep_boundary_deps: bool = False, boundary_slack_factor: float = 10.0):
+                 reduce_fragmentation: bool = False, boundary_slack_factor: float = 10.0):
         """Initialize the Fill-in/Split BSP scheduler.
 
         Args:
@@ -60,15 +60,18 @@ class FillInSplitBSPScheduler(BSPScheduler):
                           or "ds" (dominantsequence: static upward + dynamic downward rank)
             optimize_merging: Enable second phase optimization that iteratively merges adjacent supersteps
                             for maximum makespan reduction
-            superstep_boundary_deps: When enabled, uses superstep end times instead of exact task end times
-                                    for dependency-ready calculation, but only when a task ends close to
-                                    the superstep boundary (within boundary_slack_factor * sync_time).
-                                    This reduces superstep fragmentation on graphs where sync overhead
-                                    dominates (e.g., SPNs).
-            boundary_slack_factor: Multiplier for sync_time to determine when a task is "close" to the
-                                  superstep boundary. Only used when superstep_boundary_deps is enabled.
-                                  Default is 10.0, meaning tasks ending within 10*sync_time of the
-                                  superstep boundary will use boundary-based dependency timing.
+            reduce_fragmentation: Don't create a new superstep just because a task finished slightly
+                                 before the superstep boundary - wait for the boundary instead.
+                                 This prevents excessive superstep creation on graphs where sync
+                                 overhead dominates (e.g., SPNs), reducing supersteps dramatically
+                                 (e.g., from 117 to 10 on plants dataset). A task is considered
+                                 "close to the boundary" if it ends within boundary_slack_factor *
+                                 sync_time of the superstep end. Tasks ending far from the boundary
+                                 still use exact timing, preserving good distribution on out-trees.
+            boundary_slack_factor: How close to the superstep boundary counts as "close enough" to
+                                  wait for the boundary. Measured as a multiple of sync_time.
+                                  Default 10.0 means tasks ending within 10*sync_time of the
+                                  boundary will wait. Only used when reduce_fragmentation is enabled.
         """
         super().__init__()
         self.priority_mode = priority_mode.lower()
@@ -76,7 +79,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
         self.verbose = verbose
         self.draw_after_each_step = draw_after_each_step
         self.optimize_merging = optimize_merging
-        self.superstep_boundary_deps = superstep_boundary_deps
+        self.reduce_fragmentation = reduce_fragmentation
         self.boundary_slack_factor = boundary_slack_factor
 
         if self.priority_mode not in ["heft", "cpop", "ds"]:
@@ -513,11 +516,9 @@ class FillInSplitBSPScheduler(BSPScheduler):
                                   schedule: BSPSchedule, task_graph: nx.DiGraph) -> float:
         """Calculate the time when all dependencies are ready for a task.
 
-        If superstep_boundary_deps is enabled, uses superstep end times instead of
-        exact task end times, but only when the predecessor ends close to the
-        superstep boundary (within boundary_slack_factor * sync_time). This reduces
-        superstep fragmentation on graphs where sync overhead dominates while
-        preserving distribution on graphs where tasks end far from boundaries.
+        With reduce_fragmentation enabled: if a predecessor task ends close to the
+        superstep boundary, wait for the boundary instead of using the exact end time.
+        This prevents creating unnecessary supersteps when sync overhead dominates.
 
         Since we don't use task duplication, each predecessor has exactly one instance.
         The ready time is the latest end time among all predecessors.
@@ -528,7 +529,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
             task_graph: Task dependency graph
 
         Returns:
-            Time when all dependencies have completed (exact or superstep-boundary)
+            Time when all dependencies have completed
         """
         ready_time = 0.0
 
@@ -539,22 +540,22 @@ class FillInSplitBSPScheduler(BSPScheduler):
             # Get the single instance of the predecessor
             pred_instance = schedule.get_single_instance(pred_name)
 
-            if self.superstep_boundary_deps:
-                # Use superstep end time only if task ends close to boundary
+            if self.reduce_fragmentation:
+                # If task ends close to boundary, wait for boundary instead
                 sync_time = schedule.hardware.sync_time
                 slack = sync_time * self.boundary_slack_factor
                 gap_to_boundary = pred_instance.superstep.end_time - pred_instance.end
 
                 if gap_to_boundary < slack:
-                    # Task ends close to boundary - use boundary time
+                    # Close to boundary - wait for it
                     pred_ready_time = pred_instance.superstep.end_time
                 else:
-                    # Task ends far from boundary - use exact time
+                    # Far from boundary - use exact time
                     pred_ready_time = pred_instance.end
 
                 ready_time = max(ready_time, pred_ready_time)
             else:
-                # Original behavior: exact task end time
+                # Default: use exact task end time
                 ready_time = max(ready_time, pred_instance.end)
 
         return ready_time
