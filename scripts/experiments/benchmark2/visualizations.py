@@ -15,6 +15,55 @@ import numpy as np
 
 from schedulers import get_scheduler_display_name, get_ordered_scheduler_names, is_delay_model_scheduler
 
+
+def propagate_timeouts_per_dataset(data: pd.DataFrame) -> pd.DataFrame:
+    """Mark all results for a (scheduler, dataset) pair as timed out if any instance timed out.
+
+    This is done for fairer comparison: if a scheduler times out on some instances,
+    it likely struggled with the harder cases in that dataset. Without this propagation,
+    problematic cases would be masked by the timeout, making the scheduler appear
+    better than it actually is (since only the "easy" instances would contribute to
+    its average).
+
+    Args:
+        data: DataFrame with benchmark results containing 'timed_out' column
+
+    Returns:
+        DataFrame with propagated timeout flags
+    """
+    if 'timed_out' not in data.columns:
+        return data
+
+    data = data.copy()
+
+    # Find (scheduler, dataset) pairs with any timeout
+    timeout_pairs = data[data['timed_out'] == True].groupby(['scheduler', 'dataset']).size().reset_index()[['scheduler', 'dataset']]
+
+    if len(timeout_pairs) > 0:
+        # Create a set of (scheduler, dataset) tuples for fast lookup
+        timeout_set = set(zip(timeout_pairs['scheduler'], timeout_pairs['dataset']))
+
+        # Mark all rows for these pairs as timed out
+        data['timed_out'] = data.apply(
+            lambda row: True if (row['scheduler'], row['dataset']) in timeout_set else row['timed_out'],
+            axis=1
+        )
+
+    return data
+
+
+def format_value_4char(value: float) -> str:
+    """Format a value to fit in ~4 characters.
+
+    Examples: 1.02, 9.99, 10.1, 99.9, 100, 999
+    """
+    if value < 10:
+        return f'{value:.2f}'
+    elif value < 100:
+        return f'{value:.1f}'
+    else:
+        return f'{value:.0f}'
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,10 +145,10 @@ class BoxPlotVisualizer:
         # Clean and prepare data
         data = self._prepare_data(data)
 
-        # Generate plots by dataset (using grouped order)
-        datasets, _ = organize_datasets_by_type(data)
-        for dataset in datasets:
-            self._create_dataset_boxplot(data, dataset, outputdir)
+        # # Generate plots by dataset (using grouped order)
+        # datasets, _ = organize_datasets_by_type(data)
+        # for dataset in datasets:
+        #     self._create_dataset_boxplot(data, dataset, outputdir)
 
         # Generate combined plot
         self._create_combined_boxplot(data, outputdir)
@@ -171,7 +220,11 @@ class BoxPlotVisualizer:
         plt.close()
 
     def _create_combined_boxplot(self, data: pd.DataFrame, outputdir: pathlib.Path) -> None:
-        """Create combined box plot for all datasets."""
+        """Create combined box plot for all datasets.
+
+        Timed-out results are excluded from box plots, with timeout counts shown
+        as red triangle markers at the top of each subplot.
+        """
         plt.figure(figsize=(16, 10))
 
         # Sort by scheduler order
@@ -191,12 +244,28 @@ class BoxPlotVisualizer:
         else:
             axes = axes.flatten()
 
+        # Check for timeout column
+        has_timeout_col = 'timed_out' in data.columns
+
         for i, dataset in enumerate(datasets):
             dataset_data = data[data['dataset'] == dataset].copy()
 
             ax = axes[i] if i < len(axes) else plt.subplot(rows, cols, i+1)
 
-            sns.boxplot(data=dataset_data, x='scheduler_display', y='makespan_ratio', ax=ax, log_scale=10)
+            # Handle timeouts
+            if has_timeout_col:
+                # Calculate timeout counts per scheduler
+                timeout_counts = dataset_data.groupby('scheduler_display')['timed_out'].sum().to_dict()
+                # Filter out timed-out results
+                plot_data = dataset_data[~dataset_data['timed_out']].copy()
+            else:
+                timeout_counts = {}
+                plot_data = dataset_data.copy()
+
+            # Filter out NaN makespan_ratio values
+            plot_data = plot_data[plot_data['makespan_ratio'].notna()]
+
+            sns.boxplot(data=plot_data, x='scheduler_display', y='makespan_ratio', ax=ax, log_scale=10)
 
             ax.set_title(f'{dataset.title()}', fontsize=12)
             ax.set_xlabel('')
@@ -206,12 +275,23 @@ class BoxPlotVisualizer:
 
             # Mark delay model schedulers
             scheduler_names = dataset_data['scheduler'].unique()
-            for j, scheduler in enumerate(dataset_data['scheduler_display'].unique()):
-                orig_name = dataset_data[dataset_data['scheduler_display'] == scheduler]['scheduler'].iloc[0]
+            for j, scheduler in enumerate(plot_data['scheduler_display'].unique()):
+                orig_name = plot_data[plot_data['scheduler_display'] == scheduler]['scheduler'].iloc[0]
                 if is_delay_model_scheduler(orig_name):
                     if len(ax.patches) > j:
                         ax.patches[j].set_edgecolor('red')
                         ax.patches[j].set_linewidth(2)
+
+            # Add timeout markers at the top
+            if has_timeout_col and any(timeout_counts.values()):
+                ordered_display = [get_scheduler_display_name(name) for name in get_ordered_scheduler_names(dataset_data['scheduler'].unique())]
+                y_max = ax.get_ylim()[1]
+                for j, scheduler_display in enumerate(ordered_display):
+                    timeout_n = timeout_counts.get(scheduler_display, 0)
+                    if timeout_n > 0:
+                        ax.plot(j, y_max * 0.9, marker='v', color='red', markersize=6, zorder=10)
+                        ax.text(j, y_max * 0.95, f'{timeout_n}', ha='center', va='bottom',
+                               fontsize=6, color='red', fontweight='bold')
 
         # Hide unused subplots
         for i in range(n_datasets, len(axes)):
@@ -223,14 +303,34 @@ class BoxPlotVisualizer:
         plt.close()
 
     def _create_aggregated_boxplot(self, data: pd.DataFrame, outputdir: pathlib.Path) -> None:
-        """Create single aggregated box plot comparing all schedulers across all datasets."""
+        """Create single aggregated box plot comparing all schedulers across all datasets.
+
+        Timed-out results are excluded from box plots, with timeout counts shown as
+        red triangle markers at the top of the plot.
+        """
         plt.figure(figsize=(7.16/2, 4.5))
 
         # Sort by scheduler order
         data = data.sort_values('scheduler_order')
 
-        # Create box plot with all data aggregated
-        sns.boxplot(data=data, x='scheduler_display', y='makespan_ratio', palette='Set2')
+        # Check for timeout column and filter data
+        has_timeout_col = 'timed_out' in data.columns
+        if has_timeout_col:
+            # Calculate timeout counts per scheduler before filtering
+            timeout_counts = data.groupby('scheduler_display')['timed_out'].sum().to_dict()
+            total_counts = data.groupby('scheduler_display').size().to_dict()
+            # Filter out timed-out results for box plot
+            plot_data = data[~data['timed_out']].copy()
+        else:
+            timeout_counts = {}
+            total_counts = {}
+            plot_data = data.copy()
+
+        # Filter out NaN makespan_ratio values
+        plot_data = plot_data[plot_data['makespan_ratio'].notna()]
+
+        # Create box plot with filtered data
+        ax = sns.boxplot(data=plot_data, x='scheduler_display', y='makespan_ratio', palette='Set2')
 
         plt.xlabel('Scheduler', fontsize=10)
         plt.ylabel('Makespan Ratio', fontsize=10)
@@ -243,6 +343,22 @@ class BoxPlotVisualizer:
         delay_scheduler_count = sum(1 for name in scheduler_names if is_delay_model_scheduler(name))
         if delay_scheduler_count > 0:
             plt.axvline(x=delay_scheduler_count - 0.5, color='black', linewidth=2, alpha=0.8)
+
+        # Add timeout markers at the top of the plot
+        if has_timeout_col and any(timeout_counts.values()):
+            # Get x-tick labels in order
+            ordered_display = [get_scheduler_display_name(name) for name in get_ordered_scheduler_names(data['scheduler'].unique())]
+            y_max = plt.ylim()[1]
+
+            for i, scheduler_display in enumerate(ordered_display):
+                timeout_n = timeout_counts.get(scheduler_display, 0)
+                if timeout_n > 0:
+                    total_n = total_counts.get(scheduler_display, 0)
+                    # Add red triangle marker at top
+                    ax.plot(i, y_max * 0.95, marker='v', color='red', markersize=8, zorder=10)
+                    # Add timeout count text
+                    ax.text(i, y_max * 0.98, f'{timeout_n}', ha='center', va='bottom',
+                           fontsize=7, color='red', fontweight='bold')
 
         plt.tight_layout()
         plt.savefig(outputdir / 'boxplot_aggregated.png', dpi=300, bbox_inches='tight')
@@ -294,6 +410,9 @@ class HeatmapVisualizer:
 
     def _prepare_data(self, data: pd.DataFrame) -> pd.DataFrame:
         """Prepare data for heatmap visualization."""
+        # Propagate timeouts: if any instance timed out, mark all for that scheduler/dataset
+        data = propagate_timeouts_per_dataset(data)
+
         # Apply display names
         data["scheduler_display"] = data["scheduler"].apply(get_scheduler_display_name)
 
@@ -304,8 +423,13 @@ class HeatmapVisualizer:
         return data
 
     def _create_makespan_ratio_heatmap(self, data: pd.DataFrame, outputdir: pathlib.Path,
-                                     upper_threshold: float = 4.0, figsize: tuple = (7.16, 5), label_textsize = 9) -> None:
-        """Create heatmap showing all data variations as gradients within cells using imshow."""
+                                     upper_threshold: float = 4.0, figsize: tuple = (7.16, 6), label_textsize = 8, value_textsize = 7) -> None:
+        """Create heatmap showing all data variations as gradients within cells using imshow.
+
+        Cells with timeouts are shown with hatched patterns. If all instances timed out,
+        the cell is fully hatched with gray. If partial timeouts, shows the gradient of
+        successful runs with a hatched overlay and timeout count annotation.
+        """
         import numpy as np
         from matplotlib.patches import Rectangle
 
@@ -333,15 +457,42 @@ class HeatmapVisualizer:
 
         # Create the heatmap using imshow approach (similar to SAGA)
         for i, dataset in enumerate(datasets):
-            for j, scheduler_display in enumerate(ordered_display_names):
+            for j, scheduler_display in enumerate(ordered_display_names):       
                 # Get all values for this scheduler-dataset combination
                 mask = (data['dataset'] == dataset) & (data['scheduler_display'] == scheduler_display)
-                values = data[mask]['makespan_ratio'].values
+                cell_data = data[mask]
 
-                if len(values) == 0:
+                if len(cell_data) == 0:
                     # Add white cell if no data
                     rect = Rectangle((j, len(datasets) - 1 - i), 1, 1,
                                    linewidth=1, edgecolor='black', facecolor='white')
+                    ax.add_patch(rect)
+                    continue
+
+                # Check for timeouts
+                has_timeout_col = 'timed_out' in cell_data.columns
+                if has_timeout_col:
+                    timeout_count = cell_data['timed_out'].sum()
+                    total_count = len(cell_data)
+                else:
+                    timeout_count = 0
+                    total_count = len(cell_data)
+
+                # Get non-timed-out values (filter out NaN makespan_ratio)
+                valid_mask = cell_data['makespan_ratio'].notna()
+                if has_timeout_col:
+                    valid_mask = valid_mask & ~cell_data['timed_out']
+                values = cell_data[valid_mask]['makespan_ratio'].values
+
+                # Calculate cell position
+                cell_x = j
+                cell_y = len(datasets) - 1 - i  # Flip y-axis for proper ordering
+
+                if len(values) == 0:
+                    # All instances timed out - show fully hatched gray cell (no text)
+                    rect = Rectangle((cell_x, cell_y), 1, 1,
+                                   linewidth=1, edgecolor='black', facecolor='lightgray',
+                                   hatch='///', alpha=0.8)
                     ax.add_patch(rect)
                     continue
 
@@ -350,10 +501,6 @@ class HeatmapVisualizer:
 
                 # Cap values at threshold for coloring only
                 values = np.clip(values, a_min=None, a_max=upper_threshold)
-
-                # Calculate cell position
-                cell_x = j
-                cell_y = len(datasets) - 1 - i  # Flip y-axis for proper ordering
 
                 # Sort values for gradient
                 sorted_values = np.sort(values)
@@ -381,16 +528,30 @@ class HeatmapVisualizer:
                         vmax=global_max
                     )
 
-                # Add cell border
-                rect = Rectangle((cell_x, cell_y), 1, 1,
-                               linewidth=1, edgecolor='black', facecolor='none')
-                ax.add_patch(rect)
+                # Add cell border (with hatching if partial timeouts)
+                if timeout_count > 0:
+                    # Partial timeouts - add hatched overlay
+                    rect = Rectangle((cell_x, cell_y), 1, 1,
+                                   linewidth=1, edgecolor='black', facecolor='none',
+                                   hatch='///', alpha=0.3)
+                    ax.add_patch(rect)
+                else:
+                    rect = Rectangle((cell_x, cell_y), 1, 1,
+                                   linewidth=1, edgecolor='black', facecolor='none')
+                    ax.add_patch(rect)
 
                 # Add mean value as text (using original uncapped values)
                 mean_value = np.mean(original_values)
-                ax.text(cell_x + 0.5, cell_y + 0.5, f'{mean_value:.2f}',
-                       ha='center', va='center', fontsize=9, fontweight='bold',
-                       color='white' if mean_value > (global_min + global_max) / 2 else 'black')
+                if timeout_count > 0:
+                    # Show mean with timeout count
+                    label_text = f'{format_value_4char(mean_value)}\n⏱{timeout_count}/{total_count}'
+                    ax.text(cell_x + 0.5, cell_y + 0.5, label_text,
+                           ha='center', va='center', fontsize=value_textsize, fontweight='bold',
+                           color='white' if mean_value > (global_min + global_max) / 2 else 'black')
+                else:
+                    ax.text(cell_x + 0.5, cell_y + 0.5, format_value_4char(mean_value),
+                           ha='center', va='center', fontsize=value_textsize, fontweight='bold',
+                           color='white' if mean_value > (global_min + global_max) / 2 else 'black')
 
         # Set up axes
         ax.set_xlim(0, len(ordered_display_names))
@@ -419,11 +580,11 @@ class HeatmapVisualizer:
             # ax.text(delay_scheduler_count + (len(ordered_display_names) - delay_scheduler_count)/2, -0.3, 'BSP Models',
             #        ha='center', va='top', color='black', fontweight='bold', fontsize=10)
 
-        # Add colorbar
+        # Add horizontal colorbar at bottom to save horizontal space
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=global_min, vmax=global_max))
         sm.set_array([])
-        cbar = plt.colorbar(sm, ax=ax, shrink=0.8)
-        cbar.set_label(f'Makespan Ratio', fontsize=label_textsize+1)
+        cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', shrink=0.6, pad=0.22, aspect=30)
+        cbar.set_label('Makespan Ratio', fontsize=label_textsize+1)
 
         # Add visual separators between dataset groups
         if group_boundaries:

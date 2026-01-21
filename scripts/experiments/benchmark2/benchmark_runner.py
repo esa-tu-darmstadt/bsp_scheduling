@@ -11,6 +11,7 @@ import time
 from typing import Dict, List, Optional, Any
 import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, BarColumn, TextColumn
 from rich.console import Console
 
@@ -54,12 +55,86 @@ def run_single_scheduler_task(scheduler_name, scheduler, dataset_item, task_grap
             'actual_ccr': dataset_item.metadata.get('actual_ccr'),
             'sync_time': dataset_item.metadata.get('sync_time'),
             'num_tiles': dataset_item.metadata.get('num_tiles'),
-            'source_type': dataset_item.metadata.get('source_type')
+            'source_type': dataset_item.metadata.get('source_type'),
+            'timed_out': False
         }
 
     except Exception as e:
         logger.warning(f"Scheduler {scheduler_name} failed on task graph {task_graph_idx}: {e}")
         raise e
+
+
+def create_timeout_result(scheduler_name, dataset_item, task_graph_idx, dataset_name):
+    """Create a result dict for a timed-out scheduler run."""
+    return {
+        'scheduler_name': scheduler_name,
+        'makespan': None,
+        'scheduler_runtime_s': None,
+        'task_graph_idx': task_graph_idx,
+        'dataset_name': dataset_name,
+        'target_ccr': dataset_item.metadata.get('target_ccr'),
+        'actual_ccr': dataset_item.metadata.get('actual_ccr'),
+        'sync_time': dataset_item.metadata.get('sync_time'),
+        'num_tiles': dataset_item.metadata.get('num_tiles'),
+        'source_type': dataset_item.metadata.get('source_type'),
+        'timed_out': True
+    }
+
+
+def _run_task_with_timeout_worker(task_args, result_queue):
+    """Worker function that runs a scheduler task and puts result in queue."""
+    try:
+        result = run_single_scheduler_task(*task_args)
+        result_queue.put(('success', result))
+    except Exception as e:
+        result_queue.put(('error', str(e)))
+
+
+def run_task_with_timeout(task_args, timeout):
+    """Run a single scheduler task with a hard timeout using multiprocessing.
+
+    Args:
+        task_args: Tuple of arguments for run_single_scheduler_task
+        timeout: Timeout in seconds
+
+    Returns:
+        Result dict, or None if failed, with 'timed_out' flag set appropriately
+    """
+    scheduler_name = task_args[0]
+    dataset_item = task_args[2]
+    task_graph_idx = task_args[3]
+    dataset_name = task_args[4]
+
+    result_queue = multiprocessing.Queue()
+    process = multiprocessing.Process(
+        target=_run_task_with_timeout_worker,
+        args=(task_args, result_queue)
+    )
+
+    process.start()
+    process.join(timeout=timeout)
+
+    if process.is_alive():
+        # Process is still running - timeout occurred
+        logger.warning(f"Scheduler {scheduler_name} timed out on task {task_graph_idx} of {dataset_name} (>{timeout}s)")
+        process.terminate()
+        process.join(timeout=5)  # Give it a moment to terminate
+        if process.is_alive():
+            process.kill()  # Force kill if terminate didn't work
+            process.join()
+        return create_timeout_result(scheduler_name, dataset_item, task_graph_idx, dataset_name)
+
+    # Process completed - get result from queue
+    try:
+        status, result = result_queue.get_nowait()
+        if status == 'success':
+            return result
+        else:
+            logger.warning(f"Task failed: {result}")
+            return None
+    except Exception:
+        logger.warning(f"Failed to get result from queue for {scheduler_name}")
+        return None
 
 
 
@@ -261,7 +336,8 @@ class BenchmarkRunner:
     def run_all_benchmarks(self, datadir: pathlib.Path, resultsdir: pathlib.Path,
                           dataset_names: Optional[List[str]] = None, num_jobs: int = 1,
                           overwrite: bool = False, max_instances: int = 5,
-                          visualization_dir: Optional[pathlib.Path] = None) -> None:
+                          visualization_dir: Optional[pathlib.Path] = None,
+                          timeout: float = 30.0) -> None:
         """Run benchmarks on all datasets.
 
         This method parallelizes across ALL datasets and schedulers globally,
@@ -276,6 +352,7 @@ class BenchmarkRunner:
             overwrite: Whether to overwrite existing results
             max_instances: Maximum number of instances per dataset (0 = no limit)
             visualization_dir: Directory to save schedule visualizations (optional)
+            timeout: Timeout per scheduler call in seconds (default: 30)
         """
         # Find all available dataset files
         dataset_files = find_datasets(datadir)
@@ -361,7 +438,7 @@ class BenchmarkRunner:
         logger.info(f"Collected {len(all_tasks)} total tasks across {len(dataset_info)} datasets")
 
         # Step 2: Run all tasks in parallel globally
-        all_results = self._run_all_tasks_globally(all_tasks, num_jobs, dataset_info)
+        all_results = self._run_all_tasks_globally(all_tasks, num_jobs, dataset_info, timeout)
 
         # Step 3: Group results by dataset and save
         self._save_results_by_dataset(all_results, dataset_info, resultsdir)
@@ -371,8 +448,15 @@ class BenchmarkRunner:
         self.console.print(f"[bold green]Benchmark completed! Processed {len(dataset_info)} datasets with {len(all_tasks)} total tasks.")
         self.console.print()
 
-    def _run_all_tasks_globally(self, all_tasks: List, num_jobs: int, dataset_info: Dict) -> List:
-        """Run all tasks globally with progress tracking per scheduler."""
+    def _run_all_tasks_globally(self, all_tasks: List, num_jobs: int, dataset_info: Dict, timeout: float = 30.0) -> List:
+        """Run all tasks globally with progress tracking per scheduler.
+
+        Args:
+            all_tasks: List of task tuples (scheduler_name, scheduler, dataset_item, task_graph_idx, dataset_name, visualization_dir)
+            num_jobs: Number of parallel jobs
+            dataset_info: Dictionary with dataset metadata
+            timeout: Timeout per scheduler call in seconds
+        """
         # Group tasks by scheduler for progress tracking
         scheduler_names = sorted(set(task[0] for task in all_tasks))
         total_tasks = len(all_tasks)
@@ -404,23 +488,21 @@ class BenchmarkRunner:
                 )
 
             if num_jobs == 1:
-                # Sequential execution for debugging
+                # Sequential execution with hard timeout per task
                 for task in all_tasks:
                     scheduler_name = task[0]
-                    try:
-                        result = run_single_scheduler_task(*task)
-                        results.append(result)
-                    except Exception as e:
-                        logger.warning(f"Task failed: {e}")
-                        results.append(None)
-
+                    result = run_task_with_timeout(task, timeout)
+                    results.append(result)
                     progress.advance(scheduler_progress[scheduler_name])
                     progress.advance(overall_task)
             else:
-                # Parallel execution across ALL tasks globally
-                with ProcessPoolExecutor(max_workers=num_jobs) as executor:
+                # Parallel execution with hard timeout per task
+                # Use ThreadPoolExecutor to manage concurrent process-based tasks
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(max_workers=num_jobs) as executor:
                     future_to_task = {
-                        executor.submit(run_single_scheduler_task, *task): task
+                        executor.submit(run_task_with_timeout, task, timeout): task
                         for task in all_tasks
                     }
 
@@ -432,7 +514,7 @@ class BenchmarkRunner:
                             result = future.result()
                             results.append(result)
                         except Exception as e:
-                            logger.warning(f"Task failed: {e}")
+                            logger.warning(f"Task wrapper failed: {e}")
                             results.append(None)
 
                         progress.advance(scheduler_progress[scheduler_name])
@@ -473,11 +555,21 @@ class BenchmarkRunner:
                 if not task_results:
                     continue
 
-                makespans = {r['scheduler_name']: r['makespan'] for r in task_results}
-                best_makespan = min(makespans.values())
+                # Only consider non-timed-out results for best makespan calculation
+                valid_makespans = {r['scheduler_name']: r['makespan'] for r in task_results
+                                  if not r.get('timed_out', False) and r['makespan'] is not None}
+                if not valid_makespans:
+                    # All results timed out for this instance
+                    best_makespan = None
+                else:
+                    best_makespan = min(valid_makespans.values())
 
                 for result in task_results:
-                    ratio = result['makespan'] / best_makespan
+                    # Handle timed-out results (no makespan available) or all timed out
+                    if result.get('timed_out', False) or result['makespan'] is None or best_makespan is None:
+                        ratio = None
+                    else:
+                        ratio = result['makespan'] / best_makespan
                     final_results.append({
                         'scheduler': result['scheduler_name'],
                         'makespan': result['makespan'],
@@ -488,7 +580,8 @@ class BenchmarkRunner:
                         'actual_ccr': result.get('actual_ccr'),
                         'sync_time': result.get('sync_time'),
                         'num_tiles': result.get('num_tiles'),
-                        'source_type': result.get('source_type')
+                        'source_type': result.get('source_type'),
+                        'timed_out': result.get('timed_out', False)
                     })
 
             # Save to CSV

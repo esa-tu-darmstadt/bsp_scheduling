@@ -56,6 +56,8 @@ def main():
                        help='Specific schedulers to benchmark (default: all)')
     parser.add_argument('--max-instances', type=int, default=5,
                        help='Maximum instances per dataset for benchmarking (default: 5, 0 = no limit)')
+    parser.add_argument('--timeout', type=float, default=30.0,
+                       help='Timeout per scheduler call in seconds (default: 30)')
     parser.add_argument('--verbose', action='store_true', help='Enable debug logging')
 
     # Schedule comparison options
@@ -162,7 +164,8 @@ def main():
             num_jobs=args.num_jobs,
             overwrite=args.overwrite,
             max_instances=args.max_instances,
-            visualization_dir=schedules_viz_dir
+            visualization_dir=schedules_viz_dir,
+            timeout=args.timeout
         )
 
     # Step 3: Generate visualizations
