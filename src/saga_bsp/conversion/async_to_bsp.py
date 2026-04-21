@@ -11,33 +11,23 @@ def convert_async_to_bsp(
     strategy: Literal["eager", "level-based", "earliest-finishing-next"] = "earliest-finishing-next",
     backfill_threshold_percent: float = None,
     verbose: bool = False,
-    optimize_sa: bool = False,
-    sa_max_iterations: int = 1000,
-    sa_max_temp: float = 100.0,
-    sa_min_temp: float = 0.1,
-    sa_cooling_rate: float = 0.99,
 ) -> BSPSchedule:
     """Convert an async schedule to a BSP schedule using one of three strategies.
-    
+
     Args:
         hardware: The BSP hardware defining the network and synchronization time
-        task_graph: The task dependency graph  
+        task_graph: The task dependency graph
         async_schedule: The async schedule as Dict[processor, List[Task]]
         strategy: Conversion strategy to use:
             - "eager": Schedule as many tasks as possible per superstep
             - "level-based": Schedule one task per processor per superstep
             - "earliest-finishing-next": Schedule earliest finishing task next
         backfill_threshold_percent: Only applies to "earliest-finishing-next" strategy.
-            If specified, allows backfilling tasks into current superstep as long as 
+            If specified, allows backfilling tasks into current superstep as long as
             superstep finish time doesn't increase by more than this percentage (e.g., 0.05 = 5%).
-        optimize_sa: If True, apply simulated annealing optimization after conversion
-        sa_max_iterations: Maximum SA iterations (default: 1000)
-        sa_max_temp: Maximum SA temperature (default: 100.0)
-        sa_min_temp: Minimum SA temperature (default: 0.1)  
-        sa_cooling_rate: SA cooling rate (default: 0.99)
-        
+
     Returns:
-        BSPSchedule: The converted BSP schedule, optionally optimized with SA
+        BSPSchedule: The converted BSP schedule
     """
     # Create wrapper for easier access
     async_sched = AsyncSchedule(async_schedule)
@@ -81,39 +71,7 @@ def convert_async_to_bsp(
         processor = task_to_processor[task_name]
         superstep = bsp_schedule.supersteps[superstep_idx]
         superstep.schedule_task(task_name, processor)
-    
-    # Apply simulated annealing optimization if requested
-    if optimize_sa:
-        try:
-            from ..optimization.simulated_annealing_v2 import BSPSimulatedAnnealing
-            
-            if verbose:
-                print(f"Initial BSP schedule makespan: {bsp_schedule.makespan:.2f}")
-            
-            # Create and run simulated annealing
-            sa = BSPSimulatedAnnealing(
-                max_iterations=sa_max_iterations,
-                max_temp=sa_max_temp,
-                min_temp=sa_min_temp,
-                cooling_rate=sa_cooling_rate
-            )
-            
-            optimized_schedule = sa.optimize(bsp_schedule)
-            
-            if verbose:
-                print(f"Optimized BSP schedule makespan: {optimized_schedule.makespan:.2f}")
-                improvement = bsp_schedule.makespan - optimized_schedule.makespan
-                improvement_pct = improvement / bsp_schedule.makespan * 100 if bsp_schedule.makespan > 0 else 0
-                print(f"Improvement: {improvement:.2f} ({improvement_pct:.1f}%)")
-                sa.print_optimization_stats()
-            
-            return optimized_schedule
-            
-        except ImportError:
-            if verbose:
-                print("Warning: Simulated annealing optimization requested but module not available")
-            return bsp_schedule
-    
+
     return bsp_schedule
 
 

@@ -9,77 +9,59 @@ from ..conversion import convert_async_to_bsp
 
 class AsyncToBSPScheduler(BSPScheduler):
     """BSP scheduler that wraps a SAGA async scheduler.
-    
+
     This scheduler takes any SAGA async scheduler and converts its output
     to a BSP schedule using one of the async-to-BSP conversion strategies.
-    Optionally applies simulated annealing optimization.
-    
+
     Args:
         async_scheduler: Any SAGA scheduler to wrap
         strategy: BSP conversion strategy
         backfill_threshold_percent: Optional backfilling threshold
-        optimize_sa: If True, apply simulated annealing optimization
-        sa_max_iterations: Maximum SA iterations (default: 1000)
-        sa_max_temp: Maximum SA temperature (default: 100.0)
-        sa_min_temp: Minimum SA temperature (default: 0.1)  
-        sa_cooling_rate: SA cooling rate (default: 0.99)
     """
-    
+
     def __init__(
         self,
         async_scheduler: Scheduler,
         strategy: Literal["eager", "level-based", "earliest-finishing-next"] = "earliest-finishing-next",
         backfill_threshold_percent: float = None,
-        optimize_sa: bool = False,
-        sa_max_iterations: int = 1000,
-        sa_max_temp: float = 100.0,
-        sa_min_temp: float = 0.1,
-        sa_cooling_rate: float = 0.99
     ):
         self.async_scheduler = async_scheduler
         self.strategy = strategy
         self.backfill_threshold_percent = backfill_threshold_percent
-        self.optimize_sa = optimize_sa
-        self.sa_max_iterations = sa_max_iterations
-        self.sa_max_temp = sa_max_temp
-        self.sa_min_temp = sa_min_temp
-        self.sa_cooling_rate = sa_cooling_rate
-        
+
         # Create clean descriptive name
         base_name = async_scheduler.__class__.__name__.replace("Scheduler", "").upper()
-        
+
         # Map strategy to clean name
         strategy_map = {
             "eager": "Eager",
-            "level-based": "Level", 
+            "level-based": "Level",
             "earliest-finishing-next": "EarliestNext"
         }
-        
+
         strategy_name = strategy_map.get(strategy, strategy)
-        
+
         # Build final name
         name_parts = [base_name, "BSP", strategy_name]
         if backfill_threshold_percent is not None:
             backfill_pct = int(backfill_threshold_percent * 100)
             name_parts.append(f"BF{backfill_pct}%")
-        if optimize_sa:
-            name_parts.append("SA")
-        
+
         self.name = "-".join(name_parts)
-    
+
     def schedule(self, hardware: BSPHardware, task_graph: nx.DiGraph) -> BSPSchedule:
         """Schedule tasks by converting async schedule to BSP.
-        
+
         Args:
             hardware: BSP hardware configuration
             task_graph: Task dependency graph
-            
+
         Returns:
             BSP schedule with supersteps
         """
         # Get async schedule using the wrapped scheduler
         async_schedule = self.async_scheduler.schedule(hardware.network, task_graph)
-        
+
         # Convert to BSP schedule
         bsp_schedule = convert_async_to_bsp(
             hardware=hardware,
@@ -87,11 +69,6 @@ class AsyncToBSPScheduler(BSPScheduler):
             async_schedule=async_schedule,
             strategy=self.strategy,
             backfill_threshold_percent=self.backfill_threshold_percent,
-            optimize_sa=self.optimize_sa,
-            sa_max_iterations=self.sa_max_iterations,
-            sa_max_temp=self.sa_max_temp,
-            sa_min_temp=self.sa_min_temp,
-            sa_cooling_rate=self.sa_cooling_rate
         )
-        
+
         return bsp_schedule

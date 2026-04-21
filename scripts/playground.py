@@ -11,16 +11,13 @@ import matplotlib.pyplot as plt
 import networkx as nx
 
 import saga_bsp as bsp
-from saga_bsp.schedulers import MSAScheduler, FillInSplitBSPScheduler, BCSHScheduler, FillInAppendBSPScheduler
-from saga_bsp.optimization.simulated_annealing_v2 import BSPSimulatedAnnealing
+from saga_bsp.schedulers import FillInSplitBSPScheduler, BCSHScheduler
 from saga_bsp.misc import HeftBusyCommScheduler
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-sa_logger = logging.getLogger('saga_bsp.optimization.simulated_annealing_v2')
-sa_logger.setLevel(logging.DEBUG)
-  
+
 # Create test data
 network = gen_random_networks(1, 5)[0]
 task_graph = gen_parallel_chains(1, 5, 5, get_task_weight=lambda x:2)[0]
@@ -96,9 +93,6 @@ bsp.draw_bsp_gantt(bsp_schedule, title="BCSH")
 
 bsp_schedule = FillInSplitBSPScheduler(priority_mode="heft").schedule(bsp_hardware, task_graph)
 bsp.draw_bsp_gantt(bsp_schedule, title="FillInSplitBSP+heft")
-
-bsp_schedule = FillInAppendBSPScheduler(priority_mode="heft", verbose=True).schedule(bsp_hardware, task_graph)
-bsp.draw_bsp_gantt(bsp_schedule, title="FillInAppendBSP+heft")
 
 # bsp_schedule = FillInSplitBSPScheduler(priority_mode="cpop").schedule(bsp_hardware, task_graph)
 # bsp.draw_bsp_gantt(bsp_schedule, title="FillInSplitBSP+cpop")
