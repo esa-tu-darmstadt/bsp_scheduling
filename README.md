@@ -2,7 +2,7 @@
 
 Code accompanying the ICS'26 paper
 
-> **Barrier-Aware Task Scheduling for Bulk-Synchronous Parallel Architectures**
+> **Task Scheduling for Bulk-Synchronous Parallel Architectures**
 > Tim Noack and Andreas Koch
 > TU Darmstadt
 > Proceedings of the 2026 International Conference on Supercomputing (ICS '26)
