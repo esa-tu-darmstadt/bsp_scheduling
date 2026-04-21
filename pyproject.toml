@@ -14,18 +14,20 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "wfcommons==1.2", # ==1.0
+    "wfcommons==1.2",
     "anrg.saga==0.0.11",
     "pycapnp==2.2.1",
+    "matplotlib",  # used by bsp_scheduling.utils.visualization
 ]
 license = "MIT"
 
 [project.optional-dependencies]
 dev = [
     "pytest",
-    "pytest-cov"
+    "pytest-cov",
 ]
-visualization = [
-    "matplotlib",
+benchmark = [
     "rich",
+    "pandas",
+    "seaborn",
 ]
