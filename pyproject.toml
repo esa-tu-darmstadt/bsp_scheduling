@@ -27,7 +27,6 @@ dev = [
 ]
 visualization = [
     "matplotlib",
-    "pygraphviz",
     "tikzplotlib",
     "rich",
 ]
