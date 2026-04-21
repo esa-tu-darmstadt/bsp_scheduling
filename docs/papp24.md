@@ -12,7 +12,7 @@ The following sections describe optimizations and differences from the algorithm
 
 ## 1.1 Incremental Coarsening Edge Maintenance
 
-**Location:** `saga_bsp/schedulers/papp/coarsening.py` - `DAGCoarsener` class
+**Location:** `bsp_scheduling/schedulers/papp/coarsening.py` - `DAGCoarsener` class
 
 **Paper's approach:** The coarsening algorithm (Section 4.5, Appendix A.5) contracts edges one at a time until the graph reaches a target size. For each contraction step, the paper implies recomputing which edges are contractable (i.e., have no alternate path).
 
@@ -47,7 +47,7 @@ Rule 6 is critical for correctness: when contracting creates a new edge v → ne
 
 ## 1.2 Alternate Path Detection Without Graph Copy
 
-**Location:** `saga_bsp/schedulers/papp/coarsening.py` - `_has_alternate_path()` method
+**Location:** `bsp_scheduling/schedulers/papp/coarsening.py` - `_has_alternate_path()` method
 
 **Paper's approach:** To check if edge (u, v) can be contracted, verify there is no other directed path from u to v besides the direct edge.
 
@@ -63,7 +63,7 @@ Rule 6 is critical for correctness: when contracting creates a new edge v → ne
 
 ## 1.3 Edge Selection Optimizations
 
-**Location:** `saga_bsp/schedulers/papp/coarsening.py` - `_select_edge_to_contract()` method
+**Location:** `bsp_scheduling/schedulers/papp/coarsening.py` - `_select_edge_to_contract()` method
 
 **Paper's approach:** To select the best edge to contract:
 1. Sort all contractable edges by w(u) + w(v) ascending
@@ -90,7 +90,7 @@ The `comm_weight(edge)` function computes the average outgoing edge weight for a
 
 ## 1.4 BSPg Scheduler Optimizations
 
-**Location:** `saga_bsp/schedulers/papp/bspg_scheduler.py` - `BSPgScheduler` class
+**Location:** `bsp_scheduling/schedulers/papp/bspg_scheduler.py` - `BSPgScheduler` class
 
 **Paper's approach:** The BSPg greedy scheduler (Algorithm 1, Section 4.2) assigns tasks to processors as they become free, tracking finish times and idle processors.
 
@@ -127,7 +127,7 @@ The following sections document observed behaviors and limitations of the algori
 
 ## 2.1 Source Scheduler Pathological Behavior on Out-Trees
 
-**Location:** `saga_bsp/schedulers/papp/source_scheduler.py` - `SourceScheduler` class
+**Location:** `bsp_scheduling/schedulers/papp/source_scheduler.py` - `SourceScheduler` class
 
 **Algorithm:** The Source scheduler (Algorithm 2, Section 4.2 / Appendix A.2) assigns tasks in supersteps based on source layers:
 1. First superstep: cluster sources by common successors, round-robin assign clusters
@@ -198,7 +198,7 @@ The Source scheduler is designed for wide, shallow DAGs where parallelism exists
 
 ## 2.2 BSPg Scheduler Pathological Behavior on Out-Trees
 
-**Location:** `saga_bsp/schedulers/papp/bspg_scheduler.py` - `BSPgScheduler` class
+**Location:** `bsp_scheduling/schedulers/papp/bspg_scheduler.py` - `BSPgScheduler` class
 
 **Algorithm:** The BSPg greedy scheduler (Algorithm 1, Section 4.2 / Appendix A.2) assigns tasks to processors as they become free:
 1. Maintain `ready_p[p]` = nodes assignable to processor p without communication (all predecessors on p or in earlier supersteps)

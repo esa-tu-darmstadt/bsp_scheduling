@@ -11,9 +11,9 @@ from typing import Dict, Any, Optional
 import matplotlib.pyplot as plt
 import pickle
 
-# Import visualization functions from saga_bsp
-from saga_bsp.utils.visualization import draw_bsp_gantt, draw_busy_comm_gantt
-from saga_bsp.schedule import BSPSchedule
+# Import visualization functions from bsp_scheduling
+from bsp_scheduling.utils.visualization import draw_bsp_gantt, draw_busy_comm_gantt
+from bsp_scheduling.schedule import BSPSchedule
 
 logger = logging.getLogger(__name__)
 

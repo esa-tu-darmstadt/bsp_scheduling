@@ -1,4 +1,4 @@
-"""Optimized delay model schedulers for saga_bsp.
+"""Optimized delay model schedulers for bsp_scheduling.
 
 This module contains reimplemented versions of SAGA schedulers with optimizations
 for better performance, avoiding the overhead of precalculating large arrays.
@@ -11,7 +11,7 @@ Replace SAGA schedulers in existing code:
     from saga.schedulers import HeftScheduler
 
     # NEW (Optimized - fast for large problems):
-    from saga_bsp.schedulers.delaymodel import HeftScheduler
+    from bsp_scheduling.schedulers.delaymodel import HeftScheduler
 
 Replace SAGA priority functions:
 
@@ -19,7 +19,7 @@ Replace SAGA priority functions:
     from saga.schedulers.cpop import upward_rank, cpop_ranks
 
     # NEW (Optimized - fast for large problems):
-    from saga_bsp.schedulers.delaymodel.priorities import upward_rank, cpop_ranks
+    from bsp_scheduling.schedulers.delaymodel.priorities import upward_rank, cpop_ranks
 
 The optimized versions provide identical results but with significantly better
 performance by:

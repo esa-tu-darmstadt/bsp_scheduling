@@ -1277,7 +1277,7 @@ class ScheduleComparisonVisualizer:
         try:
             if 'schedule_type' in schedule_data and schedule_data['schedule_type'] == 'bsp':
                 # BSP schedule
-                from saga_bsp.utils.visualization import draw_bsp_gantt
+                from bsp_scheduling.utils.visualization import draw_bsp_gantt
                 bsp_schedule = schedule_data['schedule']
 
                 draw_bsp_gantt(
@@ -1293,7 +1293,7 @@ class ScheduleComparisonVisualizer:
 
             elif 'schedule_type' in schedule_data and schedule_data['schedule_type'] == 'busy_comm':
                 # Busy communication schedule
-                from saga_bsp.utils.visualization import draw_busy_comm_gantt
+                from bsp_scheduling.utils.visualization import draw_busy_comm_gantt
                 async_schedule = schedule_data['schedule']
 
                 draw_busy_comm_gantt(

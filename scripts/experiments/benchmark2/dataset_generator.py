@@ -17,10 +17,10 @@ from dataclasses import dataclass
 
 import networkx as nx
 import numpy as np
-from saga_bsp.misc.saga_scheduler_wrapper import preprocess_task_graph
-from saga_bsp.schedule import BSPHardware
-from saga_bsp.hardware import IPUHardware
-from saga_bsp.task_graphs import (
+from bsp_scheduling.misc.saga_scheduler_wrapper import preprocess_task_graph
+from bsp_scheduling.schedule import BSPHardware
+from bsp_scheduling.hardware import IPUHardware
+from bsp_scheduling.task_graphs import (
     WfCommonsTaskGraphGenerator, SPNTaskGraphGenerator,
     calculate_ccr, adjust_task_graph_to_ccr
 )

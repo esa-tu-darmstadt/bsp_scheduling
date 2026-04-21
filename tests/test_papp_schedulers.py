@@ -11,15 +11,15 @@ Tests for:
 
 import pytest
 import networkx as nx
-from saga_bsp import BSPHardware, BSPSchedule
-from saga_bsp.schedulers.papp import (
+from bsp_scheduling import BSPHardware, BSPSchedule
+from bsp_scheduling.schedulers.papp import (
     BSPgScheduler,
     SourceScheduler,
     MultilevelScheduler,
     DAGCoarsener,
     ContractionRecord,
 )
-from saga_bsp.optimization import HillClimbing, HCcs, ILPcs, ILPpart
+from bsp_scheduling.optimization import HillClimbing, HCcs, ILPcs, ILPpart
 
 
 # ============================================================================
@@ -396,7 +396,7 @@ class TestPappIntegration:
     @pytest.mark.xfail(raises=NotImplementedError, strict=True, reason="HC+HCcs pipeline; see HCcs.optimize")
     def test_full_pipeline(self, four_proc_hardware, larger_task_graph):
         """Test the full Papp et al. pipeline."""
-        from saga_bsp.optimization import optimize_with_hill_climbing
+        from bsp_scheduling.optimization import optimize_with_hill_climbing
 
         # Step 1: Initial schedule with BSPg
         bspg = BSPgScheduler()

@@ -1,5 +1,5 @@
 [project]
-name = "saga_bsp"
+name = "bsp_scheduling"
 version = "0.0.1"
 authors = [
   { name="Tim Noack", email="noack@esa.tu-darmstadt.de" },
@@ -14,7 +14,6 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "scipy<1.16",
     "wfcommons==1.2", # ==1.0
     "anrg.saga==0.0.11",
     "pycapnp==2.2.1",

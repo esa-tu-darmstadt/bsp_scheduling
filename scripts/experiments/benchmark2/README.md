@@ -113,7 +113,7 @@ python main.py --skip-generation --skip-benchmarking
 ## Dependencies
 
 - `wfcommons`: Workflow generation
-- `saga_bsp`: BSP scheduling framework
+- `bsp_scheduling`: BSP scheduling framework
 - `networkx`: Graph operations
 - `pandas`, `numpy`: Data processing
 - `matplotlib`, `seaborn`: Visualizations

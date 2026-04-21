@@ -1,8 +1,8 @@
 import pytest
 import networkx as nx
 from saga.scheduler import Task
-from saga_bsp.conversion import convert_async_to_bsp
-from saga_bsp.schedule import BSPSchedule, BSPHardware
+from bsp_scheduling.conversion import convert_async_to_bsp
+from bsp_scheduling.schedule import BSPSchedule, BSPHardware
 
 
 def create_simple_hardware():

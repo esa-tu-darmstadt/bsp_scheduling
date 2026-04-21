@@ -38,7 +38,7 @@ def optimize_superstep_elimination(schedule: BSPSchedule, verbose: bool = False)
         Optimized BSP schedule (new copy with eliminations applied)
 
     Example:
-        >>> from saga_bsp.optimization import optimize_superstep_elimination
+        >>> from bsp_scheduling.optimization import optimize_superstep_elimination
         >>> # After creating a schedule with any scheduler
         >>> schedule = scheduler.schedule(hardware, task_graph)
         >>> optimized = optimize_superstep_elimination(schedule, verbose=True)

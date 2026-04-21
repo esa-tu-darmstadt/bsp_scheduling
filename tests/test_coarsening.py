@@ -8,7 +8,7 @@ import pytest
 import networkx as nx
 import random
 import copy
-from saga_bsp.schedulers.papp.coarsening import DAGCoarsener
+from bsp_scheduling.schedulers.papp.coarsening import DAGCoarsener
 
 
 def create_random_dag(num_nodes: int, edge_probability: float = 0.3, seed: int = None) -> nx.DiGraph:

@@ -9,15 +9,15 @@ from typing import List, Dict, Optional
 import logging
 
 # Import optimized delay model schedulers (replaces slow SAGA schedulers)
-from saga_bsp import schedulers
-from saga_bsp.misc.saga_scheduler_wrapper import preprocess_task_graph
-from saga_bsp.schedulers.delaymodel import HeftScheduler
+from bsp_scheduling import schedulers
+from bsp_scheduling.misc.saga_scheduler_wrapper import preprocess_task_graph
+from bsp_scheduling.schedulers.delaymodel import HeftScheduler
 
 # Import BSP schedulers and utilities
-from saga_bsp.misc.heft_busy_communication import HeftBusyCommScheduler
-from saga_bsp.schedulers import BALSScheduler, BCSHScheduler, HDaggScheduler
-from saga_bsp.schedulers import BSPgScheduler, SourceScheduler, MultilevelScheduler
-from saga_bsp import AsyncToBSPScheduler
+from bsp_scheduling.misc.heft_busy_communication import HeftBusyCommScheduler
+from bsp_scheduling.schedulers import BALSScheduler, BCSHScheduler, HDaggScheduler
+from bsp_scheduling.schedulers import BSPgScheduler, SourceScheduler, MultilevelScheduler
+from bsp_scheduling import AsyncToBSPScheduler
 
 logger = logging.getLogger(__name__)
 

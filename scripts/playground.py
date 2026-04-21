@@ -10,9 +10,9 @@ from saga.utils.draw import draw_gantt, draw_network, draw_task_graph
 import matplotlib.pyplot as plt
 import networkx as nx
 
-import saga_bsp as bsp
-from saga_bsp.schedulers import BALSScheduler, BCSHScheduler
-from saga_bsp.misc import HeftBusyCommScheduler
+import bsp_scheduling as bsp
+from bsp_scheduling.schedulers import BALSScheduler, BCSHScheduler
+from bsp_scheduling.misc import HeftBusyCommScheduler
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

@@ -7,8 +7,8 @@ to the standard implementation.
 import pytest
 import networkx as nx
 import random
-from saga_bsp.schedulers.papp.bspg_scheduler import BSPgScheduler
-from saga_bsp.schedule import BSPSchedule, BSPHardware
+from bsp_scheduling.schedulers.papp.bspg_scheduler import BSPgScheduler
+from bsp_scheduling.schedule import BSPSchedule, BSPHardware
 
 
 def create_hardware(num_processors: int, sync_time: float = 1.0) -> BSPHardware:

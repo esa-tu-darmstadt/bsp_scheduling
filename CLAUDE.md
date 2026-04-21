@@ -2,7 +2,7 @@
 
 ## Overview
 
-The saga_bsp framework extends SAGA (Scheduling Algorithms Gathered) to support **Bulk Synchronous Parallel (BSP)** scheduling, a fundamentally different paradigm from the asynchronous scheduling implemented in the core SAGA library.
+The bsp_scheduling framework extends SAGA (Scheduling Algorithms Gathered) to support **Bulk Synchronous Parallel (BSP)** scheduling, a fundamentally different paradigm from the asynchronous scheduling implemented in the core SAGA library.
 
 ## The BSP Scheduling Problem
 
@@ -27,7 +27,7 @@ Tasks can only communicate across processor boundaries between supersteps, not d
 - **Data Structure**: Simple mapping of processors to task lists with start/end times
 - **Optimization Goal**: Minimize total makespan through efficient task placement
 
-### BSP Scheduling (saga_bsp)
+### BSP Scheduling (bsp_scheduling)
 - **Execution**: Tasks grouped into synchronized supersteps
 - **Communication**: Only between supersteps during exchange phase
 - **Synchronization**: Global barriers between supersteps with associated cost
@@ -163,7 +163,7 @@ Wrapper around SAGA's async schedule format for easier conversion:
 
 ### Creating a BSP Schedule
 ```python
-from saga_bsp.schedule import BSPSchedule, BSPHardware
+from bsp_scheduling.schedule import BSPSchedule, BSPHardware
 
 hardware = BSPHardware(network=network_graph, sync_time=10.0)
 schedule = BSPSchedule(hardware, task_graph)
@@ -173,7 +173,7 @@ superstep.schedule_task("task1", "proc0")
 
 ### Converting Async to BSP
 ```python
-from saga_bsp.conversion import convert_async_to_bsp
+from bsp_scheduling.conversion import convert_async_to_bsp
 
 bsp_schedule = convert_async_to_bsp(
     hardware, 
@@ -187,7 +187,7 @@ bsp_schedule = convert_async_to_bsp(
 
 ### Using BSP Schedulers
 ```python
-from saga_bsp.schedulers import HeftBSPScheduler
+from bsp_scheduling.schedulers import HeftBSPScheduler
 
 scheduler = HeftBSPScheduler(verbose=True)
 schedule = scheduler.schedule(hardware, task_graph)

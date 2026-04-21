@@ -7,8 +7,8 @@ the algorithm described in the paper:
 
 import pytest
 import networkx as nx
-from saga_bsp.schedulers.hdagg import HDaggScheduler
-from saga_bsp.schedule import BSPSchedule, BSPHardware
+from bsp_scheduling.schedulers.hdagg import HDaggScheduler
+from bsp_scheduling.schedule import BSPSchedule, BSPHardware
 
 
 def create_hardware(num_processors: int, sync_time: float = 1.0) -> BSPHardware:

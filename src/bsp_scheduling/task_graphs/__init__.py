@@ -1,5 +1,5 @@
 """
-Task graph generation utilities for saga_bsp.
+Task graph generation utilities for bsp_scheduling.
 
 This module provides utilities for generating task graphs from various sources:
 - WfCommons workflow recipes
@@ -8,12 +8,12 @@ This module provides utilities for generating task graphs from various sources:
 Usage examples:
 
 # WfCommons task graphs
-from saga_bsp.task_graphs import WfCommonsTaskGraphGenerator
+from bsp_scheduling.task_graphs import WfCommonsTaskGraphGenerator
 wf_gen = WfCommonsTaskGraphGenerator(cache_dir=Path("./cache"))
 task_graph, metadata = wf_gen.generate_task_graph("montage", task_count=100)
 
 # SPN task graphs
-from saga_bsp.task_graphs import SPNTaskGraphGenerator
+from bsp_scheduling.task_graphs import SPNTaskGraphGenerator
 spn_gen = SPNTaskGraphGenerator(cache_dir=Path("./cache"))
 task_graph, metadata = spn_gen.generate_task_graph("path/to/spn.bin")
 """

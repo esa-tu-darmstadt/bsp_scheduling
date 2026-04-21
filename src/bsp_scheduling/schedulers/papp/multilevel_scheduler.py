@@ -12,7 +12,7 @@ from typing import Dict, Set, List, Optional, Tuple, Union
 import copy
 import networkx as nx
 
-from saga_bsp.optimization.ilp_solvers import ILPcs
+from bsp_scheduling.optimization.ilp_solvers import ILPcs
 
 from ..base import BSPScheduler
 from ...schedule import BSPSchedule, BSPHardware

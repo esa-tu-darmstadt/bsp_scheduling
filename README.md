@@ -23,8 +23,8 @@ pip install -e ".[visualization]"
 
 ```python
 from saga.schedulers.data.random import gen_random_networks, gen_parallel_chains
-import saga_bsp as bsp
-from saga_bsp.schedulers import ListBSPScheduler
+import bsp_scheduling as bsp
+from bsp_scheduling.schedulers import ListBSPScheduler
 import matplotlib.pyplot as plt
 
 # Generate hardware network and task graph
@@ -61,7 +61,7 @@ plt.show()
 #### List-Based BSP Scheduler (WIP)
 HEFT-like scheduler that can split supersteps or append tasks to existing ones:
 ```python
-from saga_bsp.schedulers import ListBSPScheduler
+from bsp_scheduling.schedulers import ListBSPScheduler
 
 scheduler = ListBSPScheduler(
     verbose=True,  # Enable detailed logging
@@ -78,7 +78,7 @@ The scheduler evaluates multiple placement strategies for each task:
 #### HEFT-BSP Scheduler (Experimental, non-working)
 Experimental adaptation of the Heterogeneous Earliest Finish Time algorithm for BSP:
 ```python
-from saga_bsp.schedulers import HeftBSPScheduler
+from bsp_scheduling.schedulers import HeftBSPScheduler
 
 scheduler = HeftBSPScheduler(verbose=True)
 schedule = scheduler.schedule(hardware, task_graph)  # Note: Still under development
@@ -87,7 +87,7 @@ schedule = scheduler.schedule(hardware, task_graph)  # Note: Still under develop
 #### Async to BSP Conversion
 Convert existing asynchronous schedules to BSP with multiple strategies:
 ```python
-from saga_bsp.conversion import convert_async_to_bsp
+from bsp_scheduling.conversion import convert_async_to_bsp
 
 bsp_schedule = convert_async_to_bsp(
     hardware, 
@@ -103,7 +103,7 @@ bsp_schedule = convert_async_to_bsp(
 
 Optimize existing schedules using simulated annealing:
 ```python
-from saga_bsp.optimization import SimulatedAnnealingV2
+from bsp_scheduling.optimization import SimulatedAnnealingV2
 
 optimizer = SimulatedAnnealingV2(
     initial_temp=100,
@@ -119,7 +119,7 @@ optimized_schedule = optimizer.optimize(schedule, task_graph, hardware)
 
 Generate various visualizations to analyze schedule performance:
 ```python
-from saga_bsp.visualization import (
+from bsp_scheduling.visualization import (
     plot_gantt_chart,
     plot_processor_utilization_heatmap,
     plot_superstep_breakdown
@@ -183,7 +183,7 @@ Key methods:
 ```python
 from saga.schedulers import HeftScheduler
 from saga.schedulers.data.random import gen_random_networks, gen_out_trees
-import saga_bsp as bsp
+import bsp_scheduling as bsp
 
 # Generate network and task graph
 network = gen_random_networks(1, 5)[0]  # 5-processor network
@@ -212,8 +212,8 @@ bsp_schedule = bsp.convert_async_to_bsp(
 ```python
 import networkx as nx
 from saga.schedulers.data.random import gen_random_networks
-import saga_bsp as bsp
-from saga_bsp.schedulers import ListBSPScheduler
+import bsp_scheduling as bsp
+from bsp_scheduling.schedulers import ListBSPScheduler
 
 # Create custom task graph
 task_graph = nx.DiGraph()
@@ -250,7 +250,7 @@ pytest
 pytest tests/test_schedule.py
 
 # With coverage
-pytest --cov=saga_bsp
+pytest --cov=bsp_scheduling
 ```
 
 <!-- ## Contributing
@@ -271,7 +271,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 If you use SAGA-BSP in your research, please cite:
 ```bibtex
-@software{saga_bsp,
+@software{bsp_scheduling,
   title = {SAGA-BSP: Bulk Synchronous Parallel Scheduling Framework},
   author = {Your Name},
   year = {2024},
