@@ -1,286 +1,94 @@
-# SAGA-BSP: Bulk Synchronous Parallel Scheduling Framework
+# bsp_scheduling
 
-SAGA-BSP extends [SAGA (Scheduling Algorithms Gathered)](https://github.com/saga-scheduling/saga) to support **Bulk Synchronous Parallel (BSP)** scheduling, enabling efficient mapping of task graphs onto parallel processors that operate in synchronized phases.
+Code accompanying the ICS'26 paper
 
-## Installation
+> **Barrier-Aware Task Scheduling for Bulk-Synchronous Parallel Architectures**
+> Tim Noack and Andreas Koch
+> TU Darmstadt
+> Proceedings of the 2026 International Conference on Supercomputing (ICS '26)
+
+The repo contains the BALS scheduler introduced in the paper, reimplementations of the baseline and prior-work schedulers it is compared against, and the benchmark harness that produces the figures and tables in the evaluation.
+
+## Install
 
 ```bash
-# Clone the repository
-git clone ...
-cd saga-bsp
-
-# Install in development mode (installs all core dependencies)
-pip install -e .
-
-# Optional: Install development dependencies
-pip install -e ".[dev]"
-
-# Optional: Install visualization dependencies
-pip install -e ".[visualization]"
+git clone <repo-url> bsp_scheduling
+cd bsp_scheduling
+python -m venv .venv && source .venv/bin/activate
+pip install -e '.[benchmark,dev]'
 ```
 
-## Quick Start
+The core install pulls saga (async scheduling primitives), wfcommons (workflow DAG generation), pycapnp (SPN parsing), and matplotlib. The `benchmark` extra adds `rich`, `pandas`, and `seaborn` for the experiment scripts; `dev` adds `pytest` and `pytest-cov`.
 
-```python
-from saga.schedulers.data.random import gen_random_networks, gen_parallel_chains
-import bsp_scheduling as bsp
-from bsp_scheduling.schedulers import ListBSPScheduler
-import matplotlib.pyplot as plt
+## Reproducing the paper results
 
-# Generate hardware network and task graph
-network = gen_random_networks(1, 4)[0]  # 4-processor network
-task_graph = gen_parallel_chains(1, 3, 3)[0]  # 3 chains of 3 tasks
+All figures and the summary table in the paper come from `scripts/experiments/benchmark2`. End-to-end reproduction:
 
-# Preprocess task graph (required for BSP scheduling)
-task_graph, _ = bsp.preprocess_task_graph(task_graph)
-
-# Create BSP hardware configuration
-hardware = bsp.BSPHardware(network=network, sync_time=1.0)
-
-# Schedule using List-BSP
-scheduler = ListBSPScheduler(verbose=True)
-schedule = scheduler.schedule(hardware, task_graph)
-
-# Visualize the result
-bsp.draw_bsp_gantt(schedule, title="BSP Schedule")
-plt.show()
-```
-
-## Features
-
-### Core Components
-
-- **BSP Schedule Management**: Hierarchical schedule representation with supersteps
-- **Multiple Scheduling Algorithms**: HEFT-BSP, List-based, and conversion from async schedules
-- **Schedule Optimization**: Simulated annealing with configurable actions
-- **Visualization Tools**: Gantt charts, heatmaps, and superstep breakdowns
-- **SAGA Integration**: Seamless conversion between BSP and async schedules
-
-### Scheduling Algorithms
-
-#### List-Based BSP Scheduler (WIP)
-HEFT-like scheduler that can split supersteps or append tasks to existing ones:
-```python
-from bsp_scheduling.schedulers import ListBSPScheduler
-
-scheduler = ListBSPScheduler(
-    verbose=True,  # Enable detailed logging
-    draw_after_each_step=False  # Optionally visualize after each task placement
-)
-schedule = scheduler.schedule(hardware, task_graph)
-```
-
-The scheduler evaluates multiple placement strategies for each task:
-- Appending to existing supersteps
-- Creating new supersteps at dependency-ready times
-- Automatically chooses the strategy that minimizes makespan
-
-#### HEFT-BSP Scheduler (Experimental, non-working)
-Experimental adaptation of the Heterogeneous Earliest Finish Time algorithm for BSP:
-```python
-from bsp_scheduling.schedulers import HeftBSPScheduler
-
-scheduler = HeftBSPScheduler(verbose=True)
-schedule = scheduler.schedule(hardware, task_graph)  # Note: Still under development
-```
-
-#### Async to BSP Conversion
-Convert existing asynchronous schedules to BSP with multiple strategies:
-```python
-from bsp_scheduling.conversion import convert_async_to_bsp
-
-bsp_schedule = convert_async_to_bsp(
-    hardware, 
-    task_graph,
-    async_schedule,
-    strategy="earliest-finishing-next",  # or "eager", "level-based"
-    backfill_threshold_percent=0.05,
-    optimize_sa=True  # Apply simulated annealing optimization
-)
-```
-
-### Schedule Optimization
-
-Optimize existing schedules using simulated annealing:
-```python
-from bsp_scheduling.optimization import SimulatedAnnealingV2
-
-optimizer = SimulatedAnnealingV2(
-    initial_temp=100,
-    cooling_rate=0.95,
-    min_temp=0.1,
-    max_iterations_without_improvement=500
-)
-
-optimized_schedule = optimizer.optimize(schedule, task_graph, hardware)
-```
-
-### Visualization
-
-Generate various visualizations to analyze schedule performance:
-```python
-from bsp_scheduling.visualization import (
-    plot_gantt_chart,
-    plot_processor_utilization_heatmap,
-    plot_superstep_breakdown
-)
-
-# Gantt chart with superstep boundaries
-plot_gantt_chart(schedule)
-
-# Processor utilization heatmap
-plot_processor_utilization_heatmap(schedule)
-
-# Superstep timing breakdown
-plot_superstep_breakdown(schedule)
-```
-
-## BSP Execution Model
-
-BSP scheduling divides computation into synchronized **supersteps**, each consisting of three phases:
-
-1. **Synchronization Phase**: All processors synchronize at a barrier
-2. **Exchange Phase**: Processors exchange data needed for upcoming computations  
-3. **Computation Phase**: Processors execute assigned tasks independently
-
-Key constraints:
-- Tasks can only communicate across processors between supersteps
-- Tasks on the same processor within a superstep can share data directly
-- Superstep duration is determined by the slowest processor
-
-## API Reference
-
-### BSPHardware
-```python
-BSPHardware(network: nx.Graph, sync_time: float)
-```
-Defines the hardware configuration with processor network topology and synchronization cost.
-
-### BSPSchedule
-```python
-BSPSchedule(hardware: BSPHardware, task_graph: nx.DiGraph)
-```
-Main schedule container managing supersteps and task assignments.
-
-Key methods:
-- `add_superstep()`: Create a new superstep
-- `get_task(task_name)`: Retrieve a scheduled task
-- `validate()`: Check schedule validity
-- `makespan()`: Calculate total execution time
-
-### Superstep
-Container for tasks executing in parallel within a BSP phase.
-
-Key methods:
-- `schedule_task(task_name, processor)`: Assign task to processor
-- `get_tasks_on_processor(processor)`: Get tasks for specific processor
-- `exchange_time()`: Calculate data exchange duration
-- `computation_time()`: Get maximum computation across processors
-
-## Examples
-
-### Converting SAGA Async Schedule
-```python
-from saga.schedulers import HeftScheduler
-from saga.schedulers.data.random import gen_random_networks, gen_out_trees
-import bsp_scheduling as bsp
-
-# Generate network and task graph
-network = gen_random_networks(1, 5)[0]  # 5-processor network
-task_graph = gen_out_trees(1, 3, 3)[0]  # Out-tree with 3 levels, branching factor 3
-
-# Preprocess task graph
-task_graph, _ = bsp.preprocess_task_graph(task_graph)
-
-# Create async schedule using SAGA
-async_scheduler = HeftScheduler()
-async_schedule = async_scheduler.schedule(network, task_graph)
-
-# Convert to BSP
-bsp_hardware = bsp.BSPHardware(network=network, sync_time=1.0)
-bsp_schedule = bsp.convert_async_to_bsp(
-    bsp_hardware,
-    task_graph, 
-    async_schedule,
-    strategy="earliest-finishing-next",
-    backfill_threshold_percent=0.05,
-    optimize_sa=True
-)
-```
-
-### Custom Task Graph
-```python
-import networkx as nx
-from saga.schedulers.data.random import gen_random_networks
-import bsp_scheduling as bsp
-from bsp_scheduling.schedulers import ListBSPScheduler
-
-# Create custom task graph
-task_graph = nx.DiGraph()
-
-# Add tasks with computation costs (weight in FLOPS)
-task_graph.add_node("A", weight=100)
-task_graph.add_node("B", weight=150)
-task_graph.add_node("C", weight=200)
-task_graph.add_node("D", weight=120)
-
-# Add dependencies with communication costs (weight in bytes)
-task_graph.add_edge("A", "B", weight=50)
-task_graph.add_edge("A", "C", weight=30)
-task_graph.add_edge("B", "D", weight=40)
-task_graph.add_edge("C", "D", weight=60)
-
-# Preprocess and schedule
-task_graph, _ = bsp.preprocess_task_graph(task_graph)
-network = gen_random_networks(1, 4)[0]
-hardware = bsp.BSPHardware(network=network, sync_time=1.0)
-
-scheduler = ListBSPScheduler(verbose=True)
-schedule = scheduler.schedule(hardware, task_graph)
-```
-
-## Testing
-
-Run the test suite:
 ```bash
-# All tests
+cd scripts/experiments/benchmark2
+python main.py --num-jobs=32 --max-instances=0
+```
+
+- `--max-instances=0` runs every dataset instance (the paper uses the full set; the default cap is 5 per dataset).
+- `--num-jobs=32` runs schedulers in parallel; lower this if you have fewer cores.
+
+First-time runs spend some time generating workflow and SPN datasets under `data/`; subsequent runs reuse the cache. The benchmark itself takes around 20 mininutes for us on 128 CPU cores. If you only want to regenerate the plots from existing results, add `--skip-generation --skip-benchmarking`.
+
+Outputs appear under `scripts/experiments/benchmark2/visualizations/`:
+
+| path                                               | contents                                                |
+| -------------------------------------------------- | ------------------------------------------------------- |
+| `boxplots/boxplot_aggregated.{png,pdf}`            | aggregated makespan-ratio boxplot across all datasets   |
+| `boxplots/boxplot_combined.{png,pdf}`              | per-dataset boxplots in one figure                      |
+| `heatmaps/heatmap_makespan_ratio.{png,pdf}`        | per-dataset / per-scheduler heatmap                     |
+| `tables/summary_table.tex`, `tables/summary_stats.tex` | LaTeX table of mean / median / stddev and `\newcommand` stats |
+
+For per-option details see `scripts/experiments/benchmark2/README.md`.
+
+## Repository layout
+
+```
+src/bsp_scheduling/
+  schedulers/bals.py           BALS (introduced in the paper)
+  schedulers/bcsh.py           BCSH baseline
+  schedulers/hdagg.py          HDagg baseline
+  schedulers/papp/             Papp et al. 2024 (BSPg, Source, Multilevel)
+  schedulers/delaymodel/       HEFT variants
+  conversion/                  async-schedule -> BSP conversion strategies
+  optimization/                superstep elimination, hill climbing, ILP stubs
+  task_graphs/                 WfCommons and SPN task-graph generators
+  utils/visualization.py       Gantt-chart helpers
+
+scripts/experiments/benchmark2/  paper benchmark harness
+scripts/playground.py            small standalone example
+
+tests/                           pytest suite
+```
+
+## Tests
+
+```bash
 pytest
-
-# Specific test file
-pytest tests/test_schedule.py
-
-# With coverage
-pytest --cov=bsp_scheduling
 ```
 
-<!-- ## Contributing
+73 tests are expected to pass, with 4 strict `xfail` markers tracking the ILP and HCcs stubs (see `tests/test_papp_schedulers.py`).
 
-Contributions are welcome! Please follow these guidelines:
+## Citation
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request -->
+If you use this code, please cite the paper:
 
-<!-- ## License
-
-This project is licensed under the MIT License - see the LICENSE file for details. -->
-
-<!-- ## Citation
-
-If you use SAGA-BSP in your research, please cite:
 ```bibtex
-@software{bsp_scheduling,
-  title = {SAGA-BSP: Bulk Synchronous Parallel Scheduling Framework},
-  author = {Your Name},
-  year = {2024},
-  url = {https://github.com/yourusername/saga-bsp}
+@inproceedings{noack2026bals,
+  author    = {Noack, Tim and Koch, Andreas},
+  title     = {Barrier-Aware Task Scheduling for Bulk-Synchronous Parallel Architectures},
+  booktitle = {Proceedings of the 2026 International Conference on Supercomputing},
+  series    = {ICS '26},
+  year      = {2026},
+  location  = {Belfast, Northern Ireland},
+  publisher = {ACM},
 }
-``` -->
+```
 
-<!-- ## Acknowledgments
+## License
 
-- Built on top of [SAGA](https://github.com/saga-scheduling/saga)
-- Inspired by BSP model research in parallel computing
-- Special thanks to contributors and maintainers -->
+MIT.
