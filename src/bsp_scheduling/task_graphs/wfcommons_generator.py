@@ -9,6 +9,15 @@ from typing import Tuple, Optional, List
 
 import networkx as nx
 import numpy as np
+
+# wfcommons 1.2 looks up scipy.stats.trapz by name, but scipy 1.14+ removed
+# it in favor of scipy.stats.trapezoid (same distribution). Restore the old
+# name before wfcommons imports below so the recipes can still instantiate.
+import scipy.stats as _scipy_stats
+if not hasattr(_scipy_stats, "trapz") and hasattr(_scipy_stats, "trapezoid"):
+    _scipy_stats.trapz = _scipy_stats.trapezoid
+del _scipy_stats
+
 from wfcommons.wfchef.recipes import (
     BlastRecipe, BwaRecipe, CyclesRecipe, EpigenomicsRecipe,
     GenomeRecipe, MontageRecipe, SeismologyRecipe, SoykbRecipe,
