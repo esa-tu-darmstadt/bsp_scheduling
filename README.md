@@ -32,7 +32,7 @@ python main.py --num-jobs=32 --max-instances=0
 - `--max-instances=0` runs every dataset instance (the paper uses the full set; the default cap is 5 per dataset).
 - `--num-jobs=32` runs schedulers in parallel; lower this if you have fewer cores.
 
-First-time runs spend some time generating workflow and SPN datasets under `data/`; subsequent runs reuse the cache. The benchmark itself takes around 20 mininutes for us on 128 CPU cores. If you only want to regenerate the plots from existing results, add `--skip-generation --skip-benchmarking`.
+First-time runs spend some time generating workflow and SPN datasets under `data/`; subsequent runs reuse the cache. The benchmark itself takes around 7 minutes for on our 2x64 core CPU.
 
 Outputs appear under `scripts/experiments/benchmark2/visualizations/`:
 
