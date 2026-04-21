@@ -28,7 +28,7 @@ from dataset_generator import (
 )
 from schedulers import get_bsp_schedulers
 from benchmark_runner import BenchmarkRunner
-from visualizations import BoxPlotVisualizer, HeatmapVisualizer, ScheduleComparisonVisualizer
+from visualizations import BoxPlotVisualizer, HeatmapVisualizer, ScheduleComparisonVisualizer, LatexTableGenerator
 from solver_statistics import write_solver_statistics
 
 thisdir = pathlib.Path(__file__).parent.resolve()
@@ -183,6 +183,13 @@ def main():
     heatmap_visualizer.generate_heatmaps(
         resultsdir=args.resultsdir,
         outputdir=args.visdir / "heatmaps"
+    )
+
+    # LaTeX summary table
+    latex_generator = LatexTableGenerator()
+    latex_generator.generate_table(
+        resultsdir=args.resultsdir,
+        outputdir=args.visdir / "tables"
     )
 
     if args.schedule_comparison_task >= 0:

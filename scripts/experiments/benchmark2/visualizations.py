@@ -15,44 +15,9 @@ import numpy as np
 
 from schedulers import (
     get_scheduler_display_name, get_ordered_scheduler_names, is_delay_model_scheduler,
-    organize_schedulers_by_group, SCHEDULER_GROUP_LABELS
+    organize_schedulers_by_group, SCHEDULER_GROUP_LABELS, get_scheduler_group
 )
 
-
-def propagate_timeouts_per_dataset(data: pd.DataFrame) -> pd.DataFrame:
-    """Mark all results for a (scheduler, dataset) pair as timed out if any instance timed out.
-
-    This is done for fairer comparison: if a scheduler times out on some instances,
-    it likely struggled with the harder cases in that dataset. Without this propagation,
-    problematic cases would be masked by the timeout, making the scheduler appear
-    better than it actually is (since only the "easy" instances would contribute to
-    its average).
-
-    Args:
-        data: DataFrame with benchmark results containing 'timed_out' column
-
-    Returns:
-        DataFrame with propagated timeout flags
-    """
-    if 'timed_out' not in data.columns:
-        return data
-
-    data = data.copy()
-
-    # Find (scheduler, dataset) pairs with any timeout
-    timeout_pairs = data[data['timed_out'] == True].groupby(['scheduler', 'dataset']).size().reset_index()[['scheduler', 'dataset']]
-
-    if len(timeout_pairs) > 0:
-        # Create a set of (scheduler, dataset) tuples for fast lookup
-        timeout_set = set(zip(timeout_pairs['scheduler'], timeout_pairs['dataset']))
-
-        # Mark all rows for these pairs as timed out
-        data['timed_out'] = data.apply(
-            lambda row: True if (row['scheduler'], row['dataset']) in timeout_set else row['timed_out'],
-            axis=1
-        )
-
-    return data
 
 
 def format_value_4char(value: float) -> str:
@@ -292,9 +257,11 @@ class BoxPlotVisualizer:
                 for j, scheduler_display in enumerate(ordered_display):
                     timeout_n = timeout_counts.get(scheduler_display, 0)
                     if timeout_n > 0:
-                        ax.plot(j, y_max * 0.9, marker='v', color='red', markersize=6, zorder=10)
-                        ax.text(j, y_max * 0.95, f'{timeout_n}', ha='center', va='bottom',
-                               fontsize=6, color='red', fontweight='bold')
+                        # Triangle pointing up to indicate results beyond visible range
+                        ax.plot(j, y_max * 0.96, marker='^', color='red', markersize=8, zorder=10)
+                        # Timeout count below the triangle
+                        ax.text(j, y_max * 0.92, f'{timeout_n}', ha='center', va='top',
+                            fontsize=8, color='red', fontweight='bold')
 
         # Hide unused subplots
         for i in range(n_datasets, len(axes)):
@@ -305,13 +272,13 @@ class BoxPlotVisualizer:
         plt.savefig(outputdir / 'boxplot_combined.pdf', bbox_inches='tight')
         plt.close()
 
-    def _create_aggregated_boxplot(self, data: pd.DataFrame, outputdir: pathlib.Path) -> None:
+    def _create_aggregated_boxplot(self, data: pd.DataFrame, outputdir: pathlib.Path, label_textsize = 8) -> None:
         """Create single aggregated box plot comparing all schedulers across all datasets.
 
         Timed-out results are excluded from box plots, with timeout counts shown as
         red triangle markers at the top of the plot.
         """
-        plt.figure(figsize=(7.16/2*2, 4.5))
+        plt.figure(figsize=(7.16, 4))
 
         # Sort by scheduler order
         data = data.sort_values('scheduler_order')
@@ -335,9 +302,10 @@ class BoxPlotVisualizer:
         # Create box plot with filtered data
         ax = sns.boxplot(data=plot_data, x='scheduler_display', y='makespan_ratio', palette='Set2')
 
-        plt.xlabel('Scheduler', fontsize=10)
-        plt.ylabel('Makespan Ratio', fontsize=10)
-        plt.xticks(rotation=45, ha='right')
+        plt.xlabel('Scheduler', fontsize=label_textsize+1)
+        plt.ylabel('Makespan Ratio', fontsize=label_textsize+1)
+        plt.xticks(rotation=45, ha='right', fontsize=label_textsize)
+        plt.yticks(fontsize=label_textsize)
         plt.ylim(1, 5)  # Fixed scale from 1 to 5
         plt.grid(visible=True, axis='y', linestyle='--', alpha=0.7)
 
@@ -348,7 +316,7 @@ class BoxPlotVisualizer:
             y_min, y_max = plt.ylim()
             # Position for bracket and labels at top
             bracket_y = y_max + (y_max - y_min) * 0.05
-            label_y = y_max + (y_max - y_min) * 0.12
+            label_y = y_max + (y_max - y_min) * 0.08
             tick_height = (y_max - y_min) * 0.03
 
             for group_label, (start_idx, end_idx) in scheduler_group_boundaries.items():
@@ -373,7 +341,7 @@ class BoxPlotVisualizer:
 
                 # Add group label above bracket
                 ax.text(group_center_x, label_y, group_label,
-                       ha='center', va='bottom', fontsize=7, fontweight='bold',
+                       ha='center', va='bottom', fontsize=8, fontweight='bold',
                        color='black', clip_on=False)
 
         # Add timeout markers at the top of the plot
@@ -385,12 +353,11 @@ class BoxPlotVisualizer:
             for i, scheduler_display in enumerate(ordered_display):
                 timeout_n = timeout_counts.get(scheduler_display, 0)
                 if timeout_n > 0:
-                    total_n = total_counts.get(scheduler_display, 0)
-                    # Add red triangle marker at top
-                    ax.plot(i, y_max * 0.95, marker='v', color='red', markersize=8, zorder=10)
-                    # Add timeout count text
-                    ax.text(i, y_max * 0.98, f'{timeout_n}', ha='center', va='bottom',
-                           fontsize=7, color='red', fontweight='bold')
+                    # Triangle pointing up to indicate results beyond visible range
+                    ax.plot(i, y_max * 0.96, marker='^', color='red', markersize=8, zorder=10)
+                    # Timeout count below the triangle
+                    ax.text(i, y_max * 0.92, f'{timeout_n}', ha='center', va='top',
+                           fontsize=8, color='red', fontweight='bold')
 
         plt.tight_layout()
         plt.savefig(outputdir / 'boxplot_aggregated.png', dpi=300, bbox_inches='tight')
@@ -442,9 +409,6 @@ class HeatmapVisualizer:
 
     def _prepare_data(self, data: pd.DataFrame) -> pd.DataFrame:
         """Prepare data for heatmap visualization."""
-        # Propagate timeouts: if any instance timed out, mark all for that scheduler/dataset
-        data = propagate_timeouts_per_dataset(data)
-
         # Apply display names
         data["scheduler_display"] = data["scheduler"].apply(get_scheduler_display_name)
 
@@ -464,6 +428,11 @@ class HeatmapVisualizer:
         """
         import numpy as np
         from matplotlib.patches import Rectangle
+
+        # Timeout area styling
+        timeout_facecolor = 'lightgray'
+        timeout_hatch = '///'
+        timeout_alpha = 0.8
 
         # Order columns (schedulers)
         scheduler_names = data['scheduler'].unique()
@@ -521,10 +490,10 @@ class HeatmapVisualizer:
                 cell_y = len(datasets) - 1 - i  # Flip y-axis for proper ordering
 
                 if len(values) == 0:
-                    # All instances timed out - show fully hatched gray cell (no text)
+                    # All instances timed out - show fully hatched cell (no text)
                     rect = Rectangle((cell_x, cell_y), 1, 1,
-                                   linewidth=1, edgecolor='black', facecolor='lightgray',
-                                   hatch='///', alpha=0.8)
+                                   linewidth=1, edgecolor='black', facecolor=timeout_facecolor,
+                                   hatch=timeout_hatch, alpha=timeout_alpha)
                     ax.add_patch(rect)
                     continue
 
@@ -537,14 +506,20 @@ class HeatmapVisualizer:
                 # Sort values for gradient
                 sorted_values = np.sort(values)
 
-                # Create smooth gradient using imshow (like SAGA)
+                # Calculate proportions for split cell visualization
+                n_valid = len(values)
+                valid_fraction = n_valid / total_count if total_count > 0 else 1.0
+                timeout_fraction = 1.0 - valid_fraction
+
+                # Create smooth gradient using imshow - only in the valid (left) portion
+                gradient_extent_right = cell_x + valid_fraction
                 if len(sorted_values) > 1:
                     gradient = sorted_values.reshape(1, -1)
                     im = ax.imshow(
                         gradient,
                         cmap=cmap,
                         aspect='auto',
-                        extent=[cell_x, cell_x + 1, cell_y, cell_y + 1],
+                        extent=[cell_x, gradient_extent_right, cell_y, cell_y + 1],
                         vmin=global_min,
                         vmax=global_max
                     )
@@ -555,35 +530,29 @@ class HeatmapVisualizer:
                         gradient,
                         cmap=cmap,
                         aspect='auto',
-                        extent=[cell_x, cell_x + 1, cell_y, cell_y + 1],
+                        extent=[cell_x, gradient_extent_right, cell_y, cell_y + 1],
                         vmin=global_min,
                         vmax=global_max
                     )
 
-                # Add cell border (with hatching if partial timeouts)
+                # Add hatched rectangle for timeout portion (right side)
                 if timeout_count > 0:
-                    # Partial timeouts - add hatched overlay
-                    rect = Rectangle((cell_x, cell_y), 1, 1,
-                                   linewidth=1, edgecolor='black', facecolor='none',
-                                   hatch='///', alpha=0.3)
-                    ax.add_patch(rect)
-                else:
-                    rect = Rectangle((cell_x, cell_y), 1, 1,
-                                   linewidth=1, edgecolor='black', facecolor='none')
-                    ax.add_patch(rect)
+                    timeout_rect = Rectangle((gradient_extent_right, cell_y), timeout_fraction, 1,
+                                           linewidth=0, edgecolor='none', facecolor=timeout_facecolor,
+                                           hatch=timeout_hatch, alpha=timeout_alpha)
+                    ax.add_patch(timeout_rect)
 
-                # Add mean value as text (using original uncapped values)
-                mean_value = np.mean(original_values)
-                if timeout_count > 0:
-                    # Show mean with timeout count
-                    label_text = f'{format_value_4char(mean_value)}\n⏱{timeout_count}/{total_count}'
-                    ax.text(cell_x + 0.5, cell_y + 0.5, label_text,
-                           ha='center', va='center', fontsize=value_textsize, fontweight='bold',
-                           color='white' if mean_value > (global_min + global_max) / 2 else 'black')
-                else:
+                # Add cell border
+                rect = Rectangle((cell_x, cell_y), 1, 1,
+                               linewidth=1, edgecolor='black', facecolor='none')
+                ax.add_patch(rect)
+
+                # Add mean value as text only if no timeouts (using original uncapped values)
+                if timeout_count == 0:
+                    mean_value = np.mean(original_values)
                     ax.text(cell_x + 0.5, cell_y + 0.5, format_value_4char(mean_value),
                            ha='center', va='center', fontsize=value_textsize, fontweight='bold',
-                           color='white' if mean_value > (global_min + global_max) / 2 else 'black')
+                           color='white' if mean_value > (global_min + global_max) * 0.7 else 'black')
 
         # Set up axes
         ax.set_xlim(0, len(ordered_display_names))
@@ -654,13 +623,483 @@ class HeatmapVisualizer:
                        color='black', rotation=90)
 
         # Title and labels
-        plt.xlabel('Scheduler', fontsize=label_textsize+1)
+        # plt.xlabel('Scheduler', fontsize=label_textsize+1)
         plt.ylabel('Dataset', fontsize=label_textsize+1)
 
         plt.tight_layout()
         plt.savefig(outputdir / 'heatmap_makespan_ratio.png', dpi=300, bbox_inches='tight')
         plt.savefig(outputdir / 'heatmap_makespan_ratio.pdf', bbox_inches='tight')
         plt.close()
+
+
+class LatexTableGenerator:
+    """LaTeX table generator for benchmark summary statistics."""
+
+    def __init__(self):
+        """Initialize LaTeX table generator."""
+        pass
+
+    def generate_table(self, resultsdir: pathlib.Path, outputdir: pathlib.Path,
+                       highlight_scheduler: Optional[str] = None) -> None:
+        """Generate LaTeX summary table with makespan ratio and runtime statistics.
+
+        Args:
+            resultsdir: Directory containing benchmark results
+            outputdir: Directory to save the LaTeX file
+            highlight_scheduler: Optional scheduler name to highlight in bold
+        """
+        outputdir.mkdir(parents=True, exist_ok=True)
+
+        # Load data
+        data = self._load_data(resultsdir)
+        if data.empty:
+            logger.warning("No data found for LaTeX table")
+            return
+
+        # Prepare data
+        data = self._prepare_data(data)
+
+        # Generate table
+        latex_content = self._create_summary_table(data, highlight_scheduler)
+
+        # Write to file
+        output_path = outputdir / "summary_table.tex"
+        with open(output_path, 'w') as f:
+            f.write(latex_content)
+
+        logger.info(f"LaTeX table saved to {output_path}")
+
+        # Generate stats file with \newcommand definitions
+        self._generate_stats_file(data, outputdir)
+
+    def _generate_stats_file(self, data: pd.DataFrame, outputdir: pathlib.Path) -> None:
+        """Generate LaTeX file with \\newcommand definitions for all statistics.
+
+        Uses \\csname/\\endcsname pattern to allow scheduler keys with numbers.
+        Access stats via: \\schedstat{scheduler-key}{StatName}
+
+        Args:
+            data: Prepared DataFrame with benchmark results
+            outputdir: Directory to save the stats file
+        """
+        # Filter out timed-out results for statistics
+        has_timeout_col = 'timed_out' in data.columns
+        if has_timeout_col:
+            valid_data = data[~data['timed_out']].copy()
+        else:
+            valid_data = data.copy()
+
+        # Filter out NaN values
+        valid_data = valid_data[valid_data['makespan_ratio'].notna()]
+
+        # Get ordered scheduler names
+        scheduler_names = data['scheduler'].unique()
+        ordered_names = get_ordered_scheduler_names(scheduler_names)
+
+        lines = []
+        lines.append("% summary_stats.tex - Auto-generated scheduler statistics")
+        lines.append("% Generated from benchmark results - DO NOT EDIT MANUALLY")
+        lines.append("%")
+        lines.append("% Usage: \\schedstat{scheduler-key}{StatName}")
+        lines.append("% Example: \\schedstat{HEFT-BSP-Eager}{MeanRatio} -> 1.50")
+        lines.append("% Example: \\schedstat{HDaggScheduler-0.01}{MeanOverhead} -> 525")
+        lines.append("")
+
+        # ============================================================
+        # LOOKUP MACRO
+        # ============================================================
+        lines.append("% " + "=" * 60)
+        lines.append("% LOOKUP MACRO")
+        lines.append("% " + "=" * 60)
+        lines.append("\\newcommand{\\schedstat}[2]{\\csname sched@#1@#2\\endcsname}")
+        lines.append("")
+
+        # ============================================================
+        # BENCHMARK METADATA
+        # ============================================================
+        lines.append("% " + "=" * 60)
+        lines.append("% BENCHMARK METADATA")
+        lines.append("% " + "=" * 60)
+        # Count unique problems (dataset + variation combinations) per scheduler
+        # Use the first scheduler to count since all should have same problems
+        first_scheduler = ordered_names[0] if ordered_names else None
+        if first_scheduler:
+            num_problems = len(data[data['scheduler'] == first_scheduler])
+        else:
+            num_problems = len(data['scheduler'].unique())
+        num_schedulers = len(ordered_names)
+        num_datasets = data['dataset'].nunique() if 'dataset' in data.columns else 0
+        lines.append(f"\\newcommand{{\\benchNumProblems}}{{{num_problems}}}")
+        lines.append(f"\\newcommand{{\\benchNumSchedulers}}{{{num_schedulers}}}")
+        lines.append(f"\\newcommand{{\\benchNumDatasets}}{{{num_datasets}}}")
+        lines.append("")
+
+        # ============================================================
+        # PER-SCHEDULER STATISTICS
+        # ============================================================
+        lines.append("% " + "=" * 60)
+        lines.append("% PER-SCHEDULER STATISTICS")
+        lines.append("% " + "=" * 60)
+        lines.append("")
+
+        # Helper to generate csname command
+        def csname_cmd(key: str, stat: str, value: str) -> str:
+            return f"\\expandafter\\newcommand\\csname sched@{key}@{stat}\\endcsname{{{value}}}"
+
+        # Track stats for best-of calculations
+        all_stats = []
+
+        for scheduler in ordered_names:
+            scheduler_data = valid_data[valid_data['scheduler'] == scheduler]
+
+            if len(scheduler_data) == 0:
+                continue
+
+            display_name = get_scheduler_display_name(scheduler)
+
+            # Makespan ratio statistics
+            mean_ratio = scheduler_data['makespan_ratio'].mean()
+            median_ratio = scheduler_data['makespan_ratio'].median()
+            std_ratio = scheduler_data['makespan_ratio'].std()
+
+            # Calculate overhead percentages: (ratio - 1) * 100
+            mean_overhead = (mean_ratio - 1) * 100
+            median_overhead = (median_ratio - 1) * 100
+
+            # Count timeouts from original data
+            original_scheduler_data = data[data['scheduler'] == scheduler]
+            if 'timed_out' in original_scheduler_data.columns:
+                timeout_count = int(original_scheduler_data['timed_out'].sum())
+            else:
+                timeout_count = 0
+
+            # Store for best-of calculations
+            all_stats.append({
+                'scheduler': scheduler,
+                'display_name': display_name,
+                'mean_ratio': mean_ratio,
+                'median_ratio': median_ratio,
+                'std_ratio': std_ratio,
+                'mean_overhead': mean_overhead,
+                'median_overhead': median_overhead,
+                'timeout_count': timeout_count,
+                'group': get_scheduler_group(scheduler),
+            })
+
+            # Write per-scheduler commands using csname pattern
+            lines.append(f"% --- {scheduler} ({display_name}) ---")
+            lines.append(csname_cmd(scheduler, "MeanRatio", f"{mean_ratio:.2f}"))
+            lines.append(csname_cmd(scheduler, "MedianRatio", f"{median_ratio:.2f}"))
+            lines.append(csname_cmd(scheduler, "StdRatio", f"{std_ratio:.2f}"))
+            lines.append(csname_cmd(scheduler, "MeanOverhead", f"{mean_overhead:.0f}"))
+            lines.append(csname_cmd(scheduler, "MedianOverhead", f"{median_overhead:.0f}"))
+            lines.append(csname_cmd(scheduler, "Timeouts", f"{timeout_count}"))
+            lines.append("")
+
+        # ============================================================
+        # BEST-OF STATISTICS (simple commands for convenience)
+        # ============================================================
+        lines.append("% " + "=" * 60)
+        lines.append("% BEST-OF STATISTICS")
+        lines.append("% " + "=" * 60)
+        lines.append("")
+
+        # Best overall (excluding baseline/delay-model schedulers)
+        bsp_stats = [s for s in all_stats if not is_delay_model_scheduler(s['scheduler'])]
+        if bsp_stats:
+            best_overall = min(bsp_stats, key=lambda x: x['mean_ratio'])
+            lines.append("% === Best Overall (excluding async baseline) ===")
+            lines.append(f"\\newcommand{{\\schedBestOverallKey}}{{{best_overall['scheduler']}}}")
+            lines.append(f"\\newcommand{{\\schedBestOverallName}}{{{best_overall['display_name']}}}")
+            lines.append(f"\\newcommand{{\\schedBestOverallMeanRatio}}{{{best_overall['mean_ratio']:.2f}}}")
+            lines.append(f"\\newcommand{{\\schedBestOverallMedianRatio}}{{{best_overall['median_ratio']:.2f}}}")
+            lines.append(f"\\newcommand{{\\schedBestOverallMeanOverhead}}{{{best_overall['mean_overhead']:.0f}}}")
+            lines.append(f"\\newcommand{{\\schedBestOverallMedianOverhead}}{{{best_overall['median_overhead']:.0f}}}")
+            lines.append("")
+
+        # Best per group
+        for group_key, group_label in [('baseline', 'Baseline'), ('proposed', 'Proposed'), ('existing', 'Existing')]:
+            group_stats = [s for s in all_stats if s['group'] == group_key]
+            if group_stats:
+                best_in_group = min(group_stats, key=lambda x: x['mean_ratio'])
+                lines.append(f"% === Best {group_label} ===")
+                lines.append(f"\\newcommand{{\\schedBest{group_label}Key}}{{{best_in_group['scheduler']}}}")
+                lines.append(f"\\newcommand{{\\schedBest{group_label}Name}}{{{best_in_group['display_name']}}}")
+                lines.append(f"\\newcommand{{\\schedBest{group_label}MeanRatio}}{{{best_in_group['mean_ratio']:.2f}}}")
+                lines.append(f"\\newcommand{{\\schedBest{group_label}MedianRatio}}{{{best_in_group['median_ratio']:.2f}}}")
+                lines.append(f"\\newcommand{{\\schedBest{group_label}MeanOverhead}}{{{best_in_group['mean_overhead']:.0f}}}")
+                lines.append(f"\\newcommand{{\\schedBest{group_label}MedianOverhead}}{{{best_in_group['median_overhead']:.0f}}}")
+                lines.append("")
+
+        # ============================================================
+        # COMPARISON STATISTICS
+        # ============================================================
+        lines.append("% " + "=" * 60)
+        lines.append("% COMPARISON STATISTICS")
+        lines.append("% " + "=" * 60)
+        lines.append("")
+
+        # Calculate improvement of our best vs existing best
+        proposed_stats = [s for s in all_stats if s['group'] == 'proposed']
+        existing_stats = [s for s in all_stats if s['group'] == 'existing']
+
+        if proposed_stats and existing_stats:
+            best_proposed = min(proposed_stats, key=lambda x: x['mean_ratio'])
+            best_existing = min(existing_stats, key=lambda x: x['mean_ratio'])
+
+            # Improvement: how much better is ours vs existing (as percentage)
+            # Formula: (existing - ours) / existing * 100
+            if best_existing['mean_ratio'] > 0:
+                improvement = (best_existing['mean_ratio'] - best_proposed['mean_ratio']) / best_existing['mean_ratio'] * 100
+                lines.append("% Improvement of our best vs existing best")
+                lines.append(f"% Formula: (existing_ratio - our_ratio) / existing_ratio * 100")
+                lines.append(f"\\newcommand{{\\schedProposedVsExistingImprovement}}{{{improvement:.0f}}}")
+                lines.append("")
+
+            # Ratio comparison: how many times better
+            if best_proposed['mean_ratio'] > 0:
+                ratio_factor = best_existing['mean_ratio'] / best_proposed['mean_ratio']
+                lines.append("% How many times better our best is vs existing best")
+                lines.append(f"\\newcommand{{\\schedProposedVsExistingFactor}}{{{ratio_factor:.1f}}}")
+                lines.append("")
+
+        # Write to file
+        output_path = outputdir / "summary_stats.tex"
+        with open(output_path, 'w') as f:
+            f.write('\n'.join(lines))
+
+        logger.info(f"LaTeX stats file saved to {output_path}")
+
+    def _load_data(self, resultsdir: pathlib.Path) -> pd.DataFrame:
+        """Load data from result files."""
+        data = []
+        for path in resultsdir.glob("*.csv"):
+            df_dataset = pd.read_csv(path, index_col=0)
+            df_dataset["dataset"] = path.stem
+            data.append(df_dataset)
+
+        if not data:
+            return pd.DataFrame()
+
+        return pd.concat(data, ignore_index=True)
+
+    def _prepare_data(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Prepare data for table generation."""
+
+        # Apply display names
+        data["scheduler_display"] = data["scheduler"].apply(get_scheduler_display_name)
+
+        # Order schedulers
+        scheduler_names = data["scheduler"].unique()
+        ordered_names = get_ordered_scheduler_names(scheduler_names)
+        data["scheduler_order"] = data["scheduler"].map({name: i for i, name in enumerate(ordered_names)})
+
+        return data
+
+    def _create_summary_table(self, data: pd.DataFrame, highlight_scheduler: Optional[str] = None) -> str:
+        """Create LaTeX table content with summary statistics.
+
+        Args:
+            data: Prepared DataFrame with benchmark results
+            highlight_scheduler: Optional scheduler name (original, not display) to highlight.
+                               If None, automatically highlights the scheduler with the smallest
+                               mean makespan ratio (excluding delay model schedulers).
+
+        Returns:
+            LaTeX table content as string
+        """
+        # Filter out timed-out results for statistics
+        has_timeout_col = 'timed_out' in data.columns
+        if has_timeout_col:
+            valid_data = data[~data['timed_out']].copy()
+        else:
+            valid_data = data.copy()
+
+        # Filter out NaN values
+        valid_data = valid_data[valid_data['makespan_ratio'].notna()]
+
+        # Get ordered scheduler names
+        scheduler_names = data['scheduler'].unique()
+        ordered_names = get_ordered_scheduler_names(scheduler_names)
+
+        # Calculate statistics per scheduler
+        stats = []
+        for scheduler in ordered_names:
+            scheduler_data = valid_data[valid_data['scheduler'] == scheduler]
+
+            if len(scheduler_data) == 0:
+                continue
+
+            display_name = get_scheduler_display_name(scheduler)
+
+            # Makespan ratio statistics
+            makespan_mean = scheduler_data['makespan_ratio'].mean()
+            makespan_median = scheduler_data['makespan_ratio'].median()
+            makespan_std = scheduler_data['makespan_ratio'].std()
+
+            # Runtime statistics (if available)
+            if 'scheduler_runtime_s' in scheduler_data.columns:
+                runtime_mean = scheduler_data['scheduler_runtime_s'].mean()
+                runtime_median = scheduler_data['scheduler_runtime_s'].median()
+                runtime_std = scheduler_data['scheduler_runtime_s'].std()
+            else:
+                runtime_mean = runtime_median = runtime_std = float('nan')
+
+            # Count timeouts from original data (before filtering)
+            original_scheduler_data = data[data['scheduler'] == scheduler]
+            if 'timed_out' in original_scheduler_data.columns:
+                timeout_count = original_scheduler_data['timed_out'].sum()
+            else:
+                timeout_count = 0
+
+            stats.append({
+                'scheduler': scheduler,
+                'display_name': display_name,
+                'makespan_mean': makespan_mean,
+                'makespan_median': makespan_median,
+                'makespan_std': makespan_std,
+                'runtime_mean': runtime_mean,
+                'runtime_median': runtime_median,
+                'runtime_std': runtime_std,
+                'timeout_count': int(timeout_count),
+            })
+
+        # Auto-detect best scheduler if not specified (exclude delay model schedulers)
+        if highlight_scheduler is None:
+            best_mean = float('inf')
+            for stat in stats:
+                if not is_delay_model_scheduler(stat['scheduler']):
+                    if stat['makespan_mean'] < best_mean:
+                        best_mean = stat['makespan_mean']
+                        highlight_scheduler = stat['scheduler']
+
+        # Build LaTeX table
+        lines = []
+        lines.append(r"\begin{tabular}{l|ccc|ccc|c}")
+        lines.append(r"\multirow{2}{*}{\textbf{Algorithm}} & \multicolumn{3}{c|}{\textbf{Makespan Ratio}} & \multicolumn{3}{c|}{\textbf{Sched. Runtime (s)}} & Time- \\")
+        lines.append(r"\cline{2-4}\cline{5-7}")
+        lines.append(r" & Mean & Median & Dev. & Mean & Median & Dev. & outs \\")
+        lines.append(r"\Xhline{2\arrayrulewidth}")
+
+        # Track current group for adding thick lines between groups
+        current_group = None
+
+        for i, stat in enumerate(stats):
+            scheduler = stat['scheduler']
+            scheduler_group = get_scheduler_group(scheduler)
+
+            # Add thick line when transitioning to a new group (except for the first row)
+            if current_group is not None and scheduler_group != current_group:
+                # Replace the previous \hline with a thick line
+                if lines[-1] == r"\hline":
+                    lines[-1] = r"\Xhline{2\arrayrulewidth}"
+
+            current_group = scheduler_group
+
+            display_name = self._escape_latex(stat['display_name'])
+            display_name = self._format_name_multiline(display_name)
+
+            # Format values
+            makespan_mean = self._format_stat(stat['makespan_mean'])
+            makespan_median = self._format_stat(stat['makespan_median'])
+            makespan_std = self._format_stat(stat['makespan_std'])
+            runtime_mean = self._format_stat(stat['runtime_mean'])
+            runtime_median = self._format_stat(stat['runtime_median'])
+            runtime_std = self._format_stat(stat['runtime_std'])
+            timeout_count = stat['timeout_count']
+
+            # Check if this scheduler should be highlighted
+            is_highlighted = (highlight_scheduler is not None and scheduler == highlight_scheduler)
+
+            # Format timeout cell with red background if > 0
+            if timeout_count > 0:
+                timeout_cell = f"\\cellcolor{{red!20}}{timeout_count}"
+            else:
+                timeout_cell = str(timeout_count)
+
+            if is_highlighted:
+                # Bold the display name and green background for makespan values
+                row = f"\\textbf{{{display_name}}} & \\cellcolor{{green!20}}\\textbf{{{makespan_mean}}} & \\cellcolor{{green!20}}\\textbf{{{makespan_median}}} & \\cellcolor{{green!20}}\\textbf{{{makespan_std}}} & {runtime_mean} & {runtime_median} & {runtime_std} & {timeout_cell} \\\\"
+            else:
+                row = f"{display_name} & {makespan_mean} & {makespan_median} & {makespan_std} & {runtime_mean} & {runtime_median} & {runtime_std} & {timeout_cell} \\\\"
+
+            lines.append(row)
+
+            # Add hline after each row except the last
+            if i < len(stats) - 1:
+                lines.append(r"\hline")
+
+        lines.append(r"\end{tabular}")
+
+        return "\n".join(lines)
+
+    def _format_stat(self, value: float) -> str:
+        """Format a statistic value for display."""
+        if np.isnan(value):
+            return "--"
+        elif value < 10:
+            return f"{value:.2f}"
+        elif value < 100:
+            return f"{value:.1f}"
+        else:
+            return f"{value:.0f}"
+
+    def _escape_latex(self, text: str) -> str:
+        """Escape special LaTeX characters in text."""
+        # Order matters: escape backslash first
+        replacements = [
+            ('\\', r'\textbackslash{}'),
+            ('%', r'\%'),
+            ('&', r'\&'),
+            ('#', r'\#'),
+            ('_', r'\_'),
+            ('{', r'\{'),
+            ('}', r'\}'),
+            ('~', r'\textasciitilde{}'),
+            ('^', r'\textasciicircum{}'),
+        ]
+        for char, escaped in replacements:
+            text = text.replace(char, escaped)
+        return text
+
+    def _format_name_multiline(self, name: str, max_length: int = 20) -> str:
+        """Format a scheduler name, splitting into two lines if too long.
+
+        Uses \\makecell for multi-line cell content.
+
+        Args:
+            name: The scheduler display name (already LaTeX-escaped)
+            max_length: Maximum length before splitting
+
+        Returns:
+            Formatted name, possibly wrapped in \\makecell
+        """
+        if len(name) <= max_length:
+            return name
+
+        # Try to split at a space, + or similar delimiter near the middle
+        split_chars = [' + ', ' ', '+']
+        best_split = None
+        best_balance = float('inf')
+
+        for char in split_chars:
+            idx = name.find(char)
+            while idx != -1:
+                # Calculate how balanced this split is
+                balance = abs(idx - (len(name) - idx))
+                if balance < best_balance:
+                    best_balance = balance
+                    best_split = (idx, len(char))
+                idx = name.find(char, idx + 1)
+
+        if best_split is not None:
+            idx, char_len = best_split
+            line1 = name[:idx + char_len].strip()
+            line2 = name[idx + char_len:].strip()
+            return f"\\makecell[l]{{{line1} \\\\ {line2}}}"
+
+        # No good split point found, just return as-is
+        return name
 
 
 class ScheduleComparisonVisualizer:

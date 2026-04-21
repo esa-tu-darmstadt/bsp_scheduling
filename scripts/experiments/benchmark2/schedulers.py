@@ -108,28 +108,6 @@ class UnifiedSchedulerWrapper:
         return max_end_time
 
 
-# Scheduler ordering for visualizations
-# HeftBusyCommScheduler (async/delay model) should be first, then BSP schedulers
-SCHEDULER_ORDER = [
-    "HeftBusyCommScheduler",           # First - async/delay model (special treatment)
-    "HEFT-BSP-EarliestNext",          # BSP conversions
-    "HEFT-BSP-Eager",
-    "FillInSplitBSPScheduler-HEFT",   # Native BSP schedulers
-    "FillInSplitBSPScheduler-HEFT-Merge",
-    "FillInSplitBSPScheduler-CPoP",
-    "FillInSplitBSPScheduler-CPoP-Merge",
-    "HDaggScheduler-0.01",
-    "HDaggScheduler-0.1",
-    "HDaggScheduler-0.5",
-    "BCSHScheduler-NoEFT",
-    "BCSHScheduler-EFT",
-    # Papp et al. 2024 schedulers
-    "BSPgScheduler",
-    "SourceScheduler",
-    "MultilevelScheduler-15",
-    "MultilevelScheduler-30",
-]
-
 # Scheduler groups for visualization labels and separators
 # Groups are ordered: baseline -> proposed (ours) -> existing (comparison)
 SCHEDULER_GROUPS = {
@@ -139,10 +117,13 @@ SCHEDULER_GROUPS = {
     "proposed": [
         "HEFT-BSP-EarliestNext",
         "HEFT-BSP-Eager",
-        "FillInSplitBSPScheduler-HEFT",
-        "FillInSplitBSPScheduler-HEFT-Merge",
         "FillInSplitBSPScheduler-CPoP",
         "FillInSplitBSPScheduler-CPoP-Merge",
+        "FillInSplitBSPScheduler-HEFT",
+        "FillInSplitBSPScheduler-HEFT-Merge",
+        
+        "FillInSplitBSPScheduler-HEFT-BoundaryDeps",
+        "FillInSplitBSPScheduler-HEFT-BoundaryDeps-Merge",
     ],
     "existing": [
         "HDaggScheduler-0.01",
@@ -166,13 +147,17 @@ SCHEDULER_GROUP_LABELS = {
 
 # Scheduler renames for display
 SCHEDULER_RENAMES = {
-    "HeftBusyCommScheduler": "HEFT",
+    "HeftBusyCommScheduler": "HEFT, delay-model",
     "HEFT-BSP-EarliestNext": "HEFT + EFN",
     "HEFT-BSP-Eager": "HEFT + Eager",
     "FillInSplitBSPScheduler-HEFT": "BALS Upward",
     "FillInSplitBSPScheduler-CPoP": "BALS Combined",
     "FillInSplitBSPScheduler-HEFT-Merge": "BALS Upw. + Elim.",
     "FillInSplitBSPScheduler-CPoP-Merge": "BALS Comb. + Elim.",
+    
+    "FillInSplitBSPScheduler-HEFT-BoundaryDeps": "BALS Upw. Snap",
+    "FillInSplitBSPScheduler-HEFT-BoundaryDeps-Merge": "BALS Upw. Snap + Elim.",
+    
     # HDagg schedulers
     "HDaggScheduler-0.01": "HDagg (ε=0.01)",
     "HDaggScheduler-0.1": "HDagg (ε=0.1)",
@@ -241,6 +226,14 @@ def create_bsp_schedulers() -> Dict[str, object]:
     schedulers["FillInSplitBSPScheduler-CPoP-Merge"] = UnifiedSchedulerWrapper(
         FillInSplitBSPScheduler(priority_mode='cpop', optimize_merging=True)
     )
+    
+    schedulers["FillInSplitBSPScheduler-HEFT-BoundaryDeps"] = UnifiedSchedulerWrapper(
+    FillInSplitBSPScheduler(priority_mode='heft', reduce_fragmentation=True, boundary_slack_factor=10)
+    )
+    
+    schedulers["FillInSplitBSPScheduler-HEFT-BoundaryDeps-Merge"] = UnifiedSchedulerWrapper(
+    FillInSplitBSPScheduler(priority_mode='heft', optimize_merging=True, reduce_fragmentation=True, boundary_slack_factor=10)
+    )
 
     schedulers["HDaggScheduler-0.01"] = UnifiedSchedulerWrapper(
         HDaggScheduler(epsilon=0.01)
@@ -250,9 +243,9 @@ def create_bsp_schedulers() -> Dict[str, object]:
         HDaggScheduler(epsilon=0.1)
     )
         
-    schedulers["HDaggScheduler-0.5"] = UnifiedSchedulerWrapper(
-        HDaggScheduler(epsilon=0.5)
-    )
+    # schedulers["HDaggScheduler-0.5"] = UnifiedSchedulerWrapper(
+    #     HDaggScheduler(epsilon=0.5)
+    # )
 
     schedulers["BCSHScheduler-NoEFT"] = UnifiedSchedulerWrapper(
         BCSHScheduler(use_eft=False)
@@ -271,6 +264,7 @@ def create_bsp_schedulers() -> Dict[str, object]:
         SourceScheduler()
     )
 
+    # TODO: Uncomment for full comparison
     schedulers["MultilevelScheduler-15"] = UnifiedSchedulerWrapper(
         MultilevelScheduler(coarsening_ratios=[0.15], hc_interval=100, hc_max_steps=20)
     )
@@ -318,12 +312,13 @@ def get_ordered_scheduler_names(scheduler_names: List[str]) -> List[str]:
     Returns:
         Ordered list of scheduler names
     """
-    # Create a mapping for ordering
-    order_map = {name: i for i, name in enumerate(SCHEDULER_ORDER)}
+    # Derive order from SCHEDULER_GROUPS (preserves dict insertion order)
+    order_list = [name for group in SCHEDULER_GROUPS.values() for name in group]
+    order_map = {name: i for i, name in enumerate(order_list)}
 
     # Sort scheduler names according to the predefined order
     def get_order(name):
-        return order_map.get(name, len(SCHEDULER_ORDER))
+        return order_map.get(name, len(order_list))
 
     ordered_names = sorted(scheduler_names, key=get_order)
 
