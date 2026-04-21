@@ -1,14 +1,22 @@
-"""Fill-in/Split BSP Scheduler with three-phase placement strategy.
+"""Barrier-Aware List Scheduler (BALS).
 
-This scheduler supports three priority modes:
-- HEFT mode: Uses upward rank for task prioritization (default)
-- CPOP mode: Uses upward + downward rank for task prioritization
-- DS mode: Uses dominantsequence (static upward + dynamic downward rank)
+Places tasks one at a time, highest priority first.
 
-Implements a three-phase placement strategy in strict priority order:
-1. Fill-in: Try to place tasks in holes of existing supersteps
-2. Append: If dependency-ready time is in last superstep, try appending
-3. Split: Create new superstep or split existing one
+For each task:
+
+1. If there is an unused gap inside an existing superstep on some
+   processor where the task fits without extending that superstep, place
+   it there (picking the processor with the earliest finish).
+2. Otherwise, compute the time when all its predecessors are done. If
+   that time falls inside a superstep, split the superstep there; if it
+   lands on a boundary, take the next superstep; if it is past the
+   schedule, open a new one. Place the task on the processor with the
+   earliest finish.
+
+When boundary snapping is enabled, a predecessor that ends within
+``boundary_slack_factor * sync_time`` of its superstep's end has its
+finish time rounded up to the boundary -- avoiding a split that costs a
+full barrier for almost no parallelism.
 """
 
 from dataclasses import dataclass
@@ -17,7 +25,7 @@ import logging
 from queue import PriorityQueue
 from .base import BSPScheduler
 from .. import draw_bsp_gantt
-from ..schedule import BSPSchedule, BSPHardware, Superstep, BSPTask
+from ..schedule import BSPSchedule, BSPHardware, Superstep
 import networkx as nx
 from .delaymodel.priorities import upward_rank, cpop_ranks, calculate_dynamic_downward_rank
 
@@ -35,23 +43,22 @@ class PrioritizedTask:
         self.priority = -self.priority
 
 
-class FillInSplitBSPScheduler(BSPScheduler):
-    """Fill-in/Split BSP scheduler with three-phase placement strategy.
+class BALSScheduler(BSPScheduler):
+    """Barrier-Aware List Scheduler. Placement and snapping are described in
+    the module docstring.
 
-    This scheduler:
-    1. Computes task priority using HEFT (upward rank) or CPOP (upward + downward rank)
-    2. Processes tasks in priority order
-    3. For each task, tries strategies in order:
-       - Phase 1: Fill-in (find holes in existing supersteps)
-       - DISABLED BECAUSE NTO BENEFICIAL: Phase 2: Append (if would split last superstep, try appending instead)
-       - Phase 3: Split (create/split superstep at dependency-ready time)
-    4. Uses first successful strategy (early exit)
+    ``priority_mode`` selects task ordering:
+
+    - ``"heft"`` -- upward rank.
+    - ``"cpop"`` -- upward + downward rank.
+    - ``"ds"``   -- upward rank plus current earliest-start time, recomputed
+      after every placement.
     """
 
     def __init__(self, verbose: bool = False, draw_after_each_step: bool = False,
                  priority_mode: str = "heft", optimize_merging: bool = False,
                  reduce_fragmentation: bool = False, boundary_slack_factor: float = 10.0):
-        """Initialize the Fill-in/Split BSP scheduler.
+        """Initialize the BALS scheduler.
 
         Args:
             verbose: Enable detailed output to console
@@ -75,7 +82,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
         """
         super().__init__()
         self.priority_mode = priority_mode.lower()
-        self.name = "FillInSplit+" + self.priority_mode.capitalize()
+        self.name = "BALS+" + self.priority_mode.capitalize()
         self.verbose = verbose
         self.draw_after_each_step = draw_after_each_step
         self.optimize_merging = optimize_merging
@@ -98,7 +105,6 @@ class FillInSplitBSPScheduler(BSPScheduler):
         self.stats = {
             'tasks_scheduled': 0,
             'fill_in_placements': 0,
-            'append_placements': 0,
             'split_placements': 0,
             'supersteps_created': 0,
             'supersteps_split': 0,
@@ -108,7 +114,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
         }
 
     def schedule(self, hardware: BSPHardware, task_graph: nx.DiGraph) -> BSPSchedule:
-        """Schedule tasks using three-phase placement strategy.
+        """Schedule tasks using the two-tiered placement strategy.
 
         Args:
             hardware: BSP hardware configuration
@@ -170,7 +176,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
             # Try placement strategies in priority order
             placed = False
 
-            # Phase 1: Try fill-in strategy
+            # Tier 1: fill an idle gap in an existing superstep
             processor, superstep = self._try_fill_in(task_name, schedule, hardware, task_graph)
             if processor is not None:
                 schedule.schedule(task_name, processor, superstep)
@@ -180,18 +186,7 @@ class FillInSplitBSPScheduler(BSPScheduler):
                     self._log(f"  Placed using fill-in strategy on processor {processor}, "
                                f"superstep {superstep.index}")
 
-            # Phase 2: Try append strategy (if dependency-ready time is in last superstep)
-            if not placed and False:
-                processor, superstep = self._try_append(task_name, schedule, hardware, task_graph)
-                if processor is not None:
-                    schedule.schedule(task_name, processor, superstep)
-                    self.stats['append_placements'] += 1
-                    placed = True
-                    if self.verbose:
-                        self._log(f"  Placed using append strategy on processor {processor}, "
-                                   f"superstep {superstep.index}")
-
-            # Phase 3: Use split strategy (always works)
+            # Tier 2: split / open a superstep at the dependency-ready time
             if not placed:
                 processor, superstep = self._do_split(task_name, schedule, hardware, task_graph)
                 # Schedule the task at the beginning of the new/split superstep
@@ -383,64 +378,6 @@ class FillInSplitBSPScheduler(BSPScheduler):
 
         return best_processor, best_superstep
 
-    def _try_append(self, task_name: str, schedule: BSPSchedule,
-                   hardware: BSPHardware, task_graph: nx.DiGraph) -> Tuple[Optional[str], Optional[Superstep]]:
-        """Try to append task to last superstep if dependency-ready time allows.
-
-        Args:
-            task_name: Task to place
-            schedule: Current schedule
-            hardware: Hardware configuration
-            task_graph: Task dependency graph
-
-        Returns:
-            Tuple of (processor, superstep) if successful, (None, None) otherwise
-        """
-        if not schedule.supersteps:
-            return None, None
-
-        last_superstep = schedule.supersteps[-1]
-        best_processor = None
-        best_finish_time = float('inf')
-
-        # Get dependency-ready time (same for all processors)
-        dep_ready_time = self._get_dependency_ready_time(task_name, schedule, task_graph)
-
-        if dep_ready_time == float('inf'):
-            return None, None
-
-        # Check which superstep this time falls into
-        superstep_at_time = schedule.get_superstep_at_time(dep_ready_time)
-
-        # Only proceed if dependency-ready time is in last superstep
-        if superstep_at_time != last_superstep:
-            return None, None
-
-        # For each processor, try to append to last superstep
-        for processor in hardware.network.nodes:
-            # Check if we can schedule in last superstep
-            if schedule.can_be_scheduled_in(task_name, last_superstep, processor):
-                # Calculate task duration
-                task_duration = self._calculate_task_duration(task_name, processor, hardware, task_graph)
-
-                # Calculate finish time
-                proc_end_time = last_superstep.compute_time(processor)
-                task_finish_relative = proc_end_time + task_duration
-                task_finish_absolute = last_superstep.compute_phase_start + task_finish_relative
-
-                if task_finish_absolute < best_finish_time:
-                    best_finish_time = task_finish_absolute
-                    best_processor = processor
-
-                    if self.verbose:
-                        self._log(f"    Found append opportunity: last superstep, "
-                                   f"proc {processor}, finish={task_finish_absolute:.2f}")
-
-        if best_processor is not None:
-            return best_processor, last_superstep
-
-        return None, None
-
     def _do_split(self, task_name: str, schedule: BSPSchedule,
                  hardware: BSPHardware, task_graph: nx.DiGraph) -> Tuple[str, Superstep]:
         """Place task using split strategy (create/split superstep).
@@ -564,12 +501,11 @@ class FillInSplitBSPScheduler(BSPScheduler):
         """Print scheduling statistics."""
         print("\n" + "="*50)
         mode_str = {"heft": "HEFT", "cpop": "CPOP", "ds": "DominantSequence"}[self.priority_mode]
-        print(f"Fill-in/Split BSP Scheduler Statistics ({mode_str} priority mode)")
+        print(f"BALS Scheduler Statistics ({mode_str} priority mode)")
         print("="*50)
         print(f"Tasks scheduled:         {self.stats['tasks_scheduled']}")
         print(f"Placement strategies:")
         print(f"  - Fill-in:            {self.stats['fill_in_placements']}")
-        print(f"  - Append:             {self.stats['append_placements']}")
         print(f"  - Split:              {self.stats['split_placements']}")
         print(f"Superstep operations:")
         print(f"  - Created:            {self.stats['supersteps_created']}")

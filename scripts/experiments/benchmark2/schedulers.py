@@ -15,7 +15,7 @@ from saga_bsp.schedulers.delaymodel import HeftScheduler
 
 # Import BSP schedulers and utilities
 from saga_bsp.misc.heft_busy_communication import HeftBusyCommScheduler
-from saga_bsp.schedulers import FillInSplitBSPScheduler, BCSHScheduler, HDaggScheduler
+from saga_bsp.schedulers import BALSScheduler, BCSHScheduler, HDaggScheduler
 from saga_bsp.schedulers import BSPgScheduler, SourceScheduler, MultilevelScheduler
 from saga_bsp import AsyncToBSPScheduler
 
@@ -117,13 +117,13 @@ SCHEDULER_GROUPS = {
     "proposed": [
         "HEFT-BSP-EarliestNext",
         "HEFT-BSP-Eager",
-        "FillInSplitBSPScheduler-CPoP",
-        "FillInSplitBSPScheduler-CPoP-Merge",
-        "FillInSplitBSPScheduler-HEFT",
-        "FillInSplitBSPScheduler-HEFT-Merge",
+        "BALSScheduler-CPoP",
+        "BALSScheduler-CPoP-Merge",
+        "BALSScheduler-HEFT",
+        "BALSScheduler-HEFT-Merge",
         
-        "FillInSplitBSPScheduler-HEFT-BoundaryDeps",
-        "FillInSplitBSPScheduler-HEFT-BoundaryDeps-Merge",
+        "BALSScheduler-HEFT-BoundaryDeps",
+        "BALSScheduler-HEFT-BoundaryDeps-Merge",
     ],
     "existing": [
         "HDaggScheduler-0.01",
@@ -150,13 +150,13 @@ SCHEDULER_RENAMES = {
     "HeftBusyCommScheduler": "HEFT, delay-model",
     "HEFT-BSP-EarliestNext": "HEFT + EFN",
     "HEFT-BSP-Eager": "HEFT + Eager",
-    "FillInSplitBSPScheduler-HEFT": "BALS Upward",
-    "FillInSplitBSPScheduler-CPoP": "BALS Combined",
-    "FillInSplitBSPScheduler-HEFT-Merge": "BALS Upw. + Elim.",
-    "FillInSplitBSPScheduler-CPoP-Merge": "BALS Comb. + Elim.",
+    "BALSScheduler-HEFT": "BALS Upward",
+    "BALSScheduler-CPoP": "BALS Combined",
+    "BALSScheduler-HEFT-Merge": "BALS Upw. + Elim.",
+    "BALSScheduler-CPoP-Merge": "BALS Comb. + Elim.",
     
-    "FillInSplitBSPScheduler-HEFT-BoundaryDeps": "BALS Upw. Snap",
-    "FillInSplitBSPScheduler-HEFT-BoundaryDeps-Merge": "BALS Upw. Snap + Elim.",
+    "BALSScheduler-HEFT-BoundaryDeps": "BALS Upw. Snap",
+    "BALSScheduler-HEFT-BoundaryDeps-Merge": "BALS Upw. Snap + Elim.",
     
     # HDagg schedulers
     "HDaggScheduler-0.01": "HDagg (ε=0.01)",
@@ -207,32 +207,32 @@ def create_bsp_schedulers() -> Dict[str, object]:
 
     # 3. Native BSP schedulers - auto-detected as bsp
 
-    schedulers["FillInSplitBSPScheduler-HEFT"] = UnifiedSchedulerWrapper(
-        FillInSplitBSPScheduler(priority_mode='heft')
+    schedulers["BALSScheduler-HEFT"] = UnifiedSchedulerWrapper(
+        BALSScheduler(priority_mode='heft')
     )
 
-    schedulers["FillInSplitBSPScheduler-CPoP"] = UnifiedSchedulerWrapper(
-        FillInSplitBSPScheduler(priority_mode='cpop')
+    schedulers["BALSScheduler-CPoP"] = UnifiedSchedulerWrapper(
+        BALSScheduler(priority_mode='cpop')
     )
     
-    # schedulers["FillInSplitBSPScheduler-DS"] = UnifiedSchedulerWrapper(
-    #     FillInSplitBSPScheduler(priority_mode='ds')
+    # schedulers["BALSScheduler-DS"] = UnifiedSchedulerWrapper(
+    #     BALSScheduler(priority_mode='ds')
     # )
     
-    schedulers["FillInSplitBSPScheduler-HEFT-Merge"] = UnifiedSchedulerWrapper(
-        FillInSplitBSPScheduler(priority_mode='heft', optimize_merging=True)
+    schedulers["BALSScheduler-HEFT-Merge"] = UnifiedSchedulerWrapper(
+        BALSScheduler(priority_mode='heft', optimize_merging=True)
     )
     
-    schedulers["FillInSplitBSPScheduler-CPoP-Merge"] = UnifiedSchedulerWrapper(
-        FillInSplitBSPScheduler(priority_mode='cpop', optimize_merging=True)
+    schedulers["BALSScheduler-CPoP-Merge"] = UnifiedSchedulerWrapper(
+        BALSScheduler(priority_mode='cpop', optimize_merging=True)
     )
     
-    schedulers["FillInSplitBSPScheduler-HEFT-BoundaryDeps"] = UnifiedSchedulerWrapper(
-    FillInSplitBSPScheduler(priority_mode='heft', reduce_fragmentation=True, boundary_slack_factor=10)
+    schedulers["BALSScheduler-HEFT-BoundaryDeps"] = UnifiedSchedulerWrapper(
+    BALSScheduler(priority_mode='heft', reduce_fragmentation=True, boundary_slack_factor=10)
     )
     
-    schedulers["FillInSplitBSPScheduler-HEFT-BoundaryDeps-Merge"] = UnifiedSchedulerWrapper(
-    FillInSplitBSPScheduler(priority_mode='heft', optimize_merging=True, reduce_fragmentation=True, boundary_slack_factor=10)
+    schedulers["BALSScheduler-HEFT-BoundaryDeps-Merge"] = UnifiedSchedulerWrapper(
+    BALSScheduler(priority_mode='heft', optimize_merging=True, reduce_fragmentation=True, boundary_slack_factor=10)
     )
 
     schedulers["HDaggScheduler-0.01"] = UnifiedSchedulerWrapper(

@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 
 import saga_bsp as bsp
-from saga_bsp.schedulers import FillInSplitBSPScheduler, BCSHScheduler
+from saga_bsp.schedulers import BALSScheduler, BCSHScheduler
 from saga_bsp.misc import HeftBusyCommScheduler
 
 
@@ -87,15 +87,15 @@ bsp_hardware = bsp.BSPHardware(network=network, sync_time=0)
 # bsp.draw_bsp_gantt(optimized_schedule)
 
 # Test the HEFT BSP scheduler
-# heft_bsp_scheduler = FillInSplitBSPScheduler(verbose=True, draw_after_each_step=False)
+# heft_bsp_scheduler = BALSScheduler(verbose=True, draw_after_each_step=False)
 bsp_schedule = BCSHScheduler(verbose=False, use_eft=True).schedule(bsp_hardware, task_graph)
 bsp.draw_bsp_gantt(bsp_schedule, title="BCSH")
 
-bsp_schedule = FillInSplitBSPScheduler(priority_mode="heft").schedule(bsp_hardware, task_graph)
-bsp.draw_bsp_gantt(bsp_schedule, title="FillInSplitBSP+heft")
+bsp_schedule = BALSScheduler(priority_mode="heft").schedule(bsp_hardware, task_graph)
+bsp.draw_bsp_gantt(bsp_schedule, title="BALS+heft")
 
-# bsp_schedule = FillInSplitBSPScheduler(priority_mode="cpop").schedule(bsp_hardware, task_graph)
-# bsp.draw_bsp_gantt(bsp_schedule, title="FillInSplitBSP+cpop")
+# bsp_schedule = BALSScheduler(priority_mode="cpop").schedule(bsp_hardware, task_graph)
+# bsp.draw_bsp_gantt(bsp_schedule, title="BALS+cpop")
 
 bsp_schedule.assert_valid()
 

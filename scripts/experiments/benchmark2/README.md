@@ -53,8 +53,8 @@ Currently enabled schedulers matching the existing benchmark:
 ### BSP Models
 - **HEFT-BSP-EarliestNext**: HEFT converted with earliest-finishing-next strategy
 - **HEFT-BSP-Eager**: HEFT converted with eager strategy
-- **FillInSplitBSPScheduler-HEFT**: Native BSP scheduler with HEFT priority
-- **FillInSplitBSPScheduler-CPoP**: Native BSP scheduler with CPoP priority
+- **BALSScheduler-HEFT**: Native BSP scheduler with HEFT priority
+- **BALSScheduler-CPoP**: Native BSP scheduler with CPoP priority
 - **BCSHScheduler-NoEFT**: BCSH scheduler without EFT
 - **BCSHScheduler-EFT**: BCSH scheduler with EFT
 

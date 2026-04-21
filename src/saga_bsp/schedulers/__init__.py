@@ -1,6 +1,6 @@
 from .base import BSPScheduler
 from .async_to_bsp_scheduler import AsyncToBSPScheduler
-from .fillin_split_bsp import FillInSplitBSPScheduler
+from .bals import BALSScheduler
 from .bcsh import BCSHScheduler
 from .hdagg import HDaggScheduler
 
@@ -9,7 +9,7 @@ from .papp import BSPgScheduler, SourceScheduler, MultilevelScheduler, DAGCoarse
 
 __all__ = [
     'BSPScheduler', 'AsyncToBSPScheduler',
-    'FillInSplitBSPScheduler', 'BCSHScheduler', 'HDaggScheduler',
+    'BALSScheduler', 'BCSHScheduler', 'HDaggScheduler',
     # Papp et al. 2024
     'BSPgScheduler', 'SourceScheduler', 'MultilevelScheduler', 'DAGCoarsener', 'ContractionRecord',
 ]
