@@ -1,4 +1,4 @@
-# bsp_scheduling
+# Barrier-Aware Task Scheduling for Bulk-Synchronous Parallel Architectures
 
 Code accompanying the ICS'26 paper
 
