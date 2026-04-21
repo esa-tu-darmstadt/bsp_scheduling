@@ -2,16 +2,16 @@ import pytest
 import networkx as nx
 from saga.scheduler import Task
 from saga_bsp.conversion import convert_async_to_bsp
-from saga_bsp.schedule import BSPSchedule
+from saga_bsp.schedule import BSPSchedule, BSPHardware
 
 
-def create_simple_network():
-    """Create a simple 2-processor network"""
+def create_simple_hardware():
+    """Create a simple 2-processor BSP hardware."""
     network = nx.Graph()
     network.add_node("proc1", weight=1.0)
-    network.add_node("proc2", weight=1.0) 
+    network.add_node("proc2", weight=1.0)
     network.add_edge("proc1", "proc2", weight=1.0)
-    return network
+    return BSPHardware(network=network, sync_time=0.0)
 
 
 def create_diamond_task_graph():
@@ -32,7 +32,7 @@ def create_diamond_task_graph():
 
 def test_simple_conversion():
     """Test basic conversion of a simple async schedule"""
-    network = create_simple_network()
+    hardware = create_simple_hardware()
     task_graph = create_diamond_task_graph()
     
     # Create async schedule: A on proc1, B and C on proc2, D on proc1
@@ -48,7 +48,7 @@ def test_simple_conversion():
     }
     
     # Convert to BSP
-    bsp_schedule = convert_async_to_bsp(network, task_graph, async_schedule)
+    bsp_schedule = convert_async_to_bsp(hardware, task_graph, async_schedule)
     
     # Basic validation
     assert isinstance(bsp_schedule, BSPSchedule)
@@ -66,7 +66,7 @@ def test_simple_conversion():
 
 def test_superstep_dependencies():
     """Test that BSP supersteps respect communication dependencies"""
-    network = create_simple_network()
+    hardware = create_simple_hardware()
     task_graph = create_diamond_task_graph()
     
     # Create async schedule with inter-processor dependencies
@@ -81,7 +81,7 @@ def test_superstep_dependencies():
         ]
     }
     
-    bsp_schedule = convert_async_to_bsp(network, task_graph, async_schedule)
+    bsp_schedule = convert_async_to_bsp(hardware, task_graph, async_schedule)
     
     # Verify task placement in supersteps
     task_to_superstep = {}
@@ -102,7 +102,7 @@ def test_superstep_dependencies():
 
 def test_linear_chain():
     """Test conversion of a linear task chain"""
-    network = create_simple_network()
+    hardware = create_simple_hardware()
     
     # Linear chain task graph
     task_graph = nx.DiGraph()
@@ -123,7 +123,7 @@ def test_linear_chain():
         ]
     }
     
-    bsp_schedule = convert_async_to_bsp(network, task_graph, async_schedule)
+    bsp_schedule = convert_async_to_bsp(hardware, task_graph, async_schedule)
     
     # Should have 3 supersteps due to alternating processor assignments
     assert bsp_schedule.num_supersteps >= 2
@@ -141,12 +141,12 @@ def test_linear_chain():
 
 def test_empty_schedule():
     """Test handling of empty async schedule"""
-    network = create_simple_network()
+    hardware = create_simple_hardware()
     task_graph = nx.DiGraph()
     
     async_schedule = {"proc1": [], "proc2": []}
     
-    bsp_schedule = convert_async_to_bsp(network, task_graph, async_schedule)
+    bsp_schedule = convert_async_to_bsp(hardware, task_graph, async_schedule)
     
     assert bsp_schedule.num_supersteps == 0
     assert bsp_schedule.makespan == 0.0
@@ -154,7 +154,7 @@ def test_empty_schedule():
 
 def test_single_task():
     """Test conversion with single task"""
-    network = create_simple_network()
+    hardware = create_simple_hardware()
     
     task_graph = nx.DiGraph()
     task_graph.add_node("T1", weight=10.0)
@@ -164,7 +164,7 @@ def test_single_task():
         "proc2": []
     }
     
-    bsp_schedule = convert_async_to_bsp(network, task_graph, async_schedule)
+    bsp_schedule = convert_async_to_bsp(hardware, task_graph, async_schedule)
     
     assert bsp_schedule.num_supersteps == 1
     assert len(bsp_schedule.supersteps[0].tasks["proc1"]) == 1
